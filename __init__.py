@@ -13,7 +13,8 @@ them (`portfolio_boards`), dispatch a feature to one over A2A (`portfolio_dispat
 read one back structured (`portfolio_board_read`), see a bounded cross-board rollup
 (`portfolio_rollup`), watch for changes without polling (`portfolio_watch` +
 `portfolio_diff`), and sequence cross-board dependencies (`portfolio_link` +
-`portfolio_plan`). See ADR 0055.
+`portfolio_plan` + `portfolio_autodispatch` — hold work behind a cross-board blocker,
+then create it once the blocker ships). See ADR 0055.
 
 P2 deltas are PULL-DIFF, not push: the PM snapshots each board (state per feature)
 and reports what changed since the last check. A2A push notifications are task-scoped
@@ -298,6 +299,26 @@ def _dispatch_instruction(title: str, spec: str, acceptance_criteria: str, files
     return "\n".join(lines)
 
 
+async def _a2a_create_feature(
+    rec: dict, title: str, spec: str, acceptance_criteria: str = "", files_to_modify: str = ""
+) -> str:
+    """Dispatch a 'create + ready a feature' instruction to a team board over A2A and
+    return the team lead's reply. Shared by portfolio_dispatch and portfolio_autodispatch.
+    Raises on a dispatch error (the caller formats the message)."""
+    from plugins.delegates.adapters import ADAPTERS, Delegate
+
+    d = Delegate(
+        name=rec["name"],
+        type="a2a",
+        url=rec["url"].rstrip("/") + "/a2a",
+        auth_scheme="bearer",
+        auth_token=rec.get("token", ""),
+    )
+    return await ADAPTERS["a2a"].dispatch(
+        d, _dispatch_instruction(title, spec, acceptance_criteria, files_to_modify), timeout=120
+    )
+
+
 def _tools() -> list:
     @tool
     def portfolio_boards() -> str:
@@ -336,19 +357,8 @@ def _tools() -> list:
         rec = _remote_by_name(board)
         if rec is None:
             return f"Error: no team board named {board!r}. Call portfolio_boards to list them."
-        from plugins.delegates.adapters import ADAPTERS, Delegate
-
-        d = Delegate(
-            name=board,
-            type="a2a",
-            url=rec["url"].rstrip("/") + "/a2a",
-            auth_scheme="bearer",
-            auth_token=rec.get("token", ""),
-        )
         try:
-            return await ADAPTERS["a2a"].dispatch(
-                d, _dispatch_instruction(title, spec, acceptance_criteria, files_to_modify), timeout=120
-            )
+            return await _a2a_create_feature(rec, title, spec, acceptance_criteria, files_to_modify)
         except Exception as exc:  # noqa: BLE001 — surface the dispatch failure to the model
             return f"Error dispatching to {board!r}: {exc}"
 
@@ -453,14 +463,25 @@ def _tools() -> list:
         to_board: str = "",
         to_feature: str = "",
         note: str = "",
+        title: str = "",
+        spec: str = "",
+        acceptance_criteria: str = "",
+        files_to_modify: str = "",
         remove: str = "",
     ) -> str:
         """Record (or remove) a CROSS-BOARD dependency: ``from_board``'s ``from_feature``
         is blocked until ``to_board``'s ``to_feature`` is done (merged on that team's
         board). Features are addressed by (board name, feature id) — ids are board-local,
-        so the board is always required. Run portfolio_plan to see the graph + what's
-        unblocked. To delete an edge, pass ``remove="lnk-..."`` (the id from
-        portfolio_plan)."""
+        so the board is always required.
+
+        Give ``title`` + ``spec`` (and optionally acceptance_criteria / files_to_modify)
+        to make it a **planned dispatch**: ``from_feature`` is then just a planning label,
+        the work is NOT created on ``from_board`` yet, and ``portfolio_autodispatch`` will
+        create it there once the blocker ships. Without title/spec it's a plain advisory
+        link between two existing features.
+
+        Run portfolio_plan to see the graph + what's unblocked. To delete a link, pass
+        ``remove="lnk-..."`` (the id from portfolio_plan)."""
         links = _load_links()
         if remove:
             kept = [ln for ln in links if ln.get("id") != remove]
@@ -486,12 +507,21 @@ def _tools() -> list:
             "to_feature": to_feature,
             "note": note,
         }
+        if title or spec:  # planned dispatch — the held work to create once unblocked
+            edge.update(
+                title=title,
+                spec=spec,
+                acceptance_criteria=acceptance_criteria,
+                files_to_modify=files_to_modify,
+                dispatched=False,
+            )
         if _has_cycle(links + [edge]):
             return "Error: that link would create a cross-board dependency cycle — not recorded."
         _save_links(links + [edge])
-        return json.dumps(
-            {k: edge[k] for k in ("id", "from_board", "from_feature", "to_board", "to_feature")}, indent=2
-        )
+        fields = ["id", "from_board", "from_feature", "to_board", "to_feature"]
+        if edge.get("spec"):
+            fields += ["title", "dispatched"]
+        return json.dumps({k: edge[k] for k in fields}, indent=2)
 
     @tool
     async def portfolio_plan() -> str:
@@ -523,8 +553,9 @@ def _tools() -> list:
                 return "dangling"
             return "satisfied" if state[key] == "done" else "blocking"
 
-        enriched = [
-            {
+        enriched = []
+        for ln in links:
+            e = {
                 "id": ln["id"],
                 "from_board": ln["from_board"],
                 "from_feature": ln["from_feature"],
@@ -533,13 +564,17 @@ def _tools() -> list:
                 "status": status_of(ln),
                 "to_state": state.get((ln["to_board"], ln["to_feature"])),
             }
-            for ln in links
-        ]
+            if ln.get("spec"):  # a planned-dispatch link (portfolio_autodispatch creates it when satisfied)
+                e["planned"] = True
+                e["dispatched"] = bool(ln.get("dispatched"))
+            enriched.append(e)
 
         from collections import defaultdict
 
         by_from: dict = defaultdict(list)
         for e in enriched:
+            if e.get("dispatched"):
+                continue  # already auto-dispatched — the held work was created on its board
             by_from[(e["from_board"], e["from_feature"])].append(e)
         ready, blocked = [], []
         for (fb, ff), edges in by_from.items():
@@ -566,6 +601,64 @@ def _tools() -> list:
                 )
         return json.dumps({"links": enriched, "ready_to_dispatch": ready, "blocked": blocked}, indent=2)
 
+    @tool
+    async def portfolio_autodispatch(dry_run: bool = False) -> str:
+        """Close the loop: dispatch every **planned** cross-board link whose blocker has
+        shipped (the to-feature reached ``done``) and that hasn't been dispatched yet —
+        creating the held work on its board now that the dependency is satisfied. Set up
+        the held work with ``portfolio_link(..., title=, spec=)``. Idempotent: a per-link
+        ``dispatched`` flag prevents re-creating, so it's safe to run on a schedule. Pass
+        ``dry_run=True`` to preview what would dispatch without doing it. Still-blocked or
+        advisory-only links are left alone."""
+        links = _load_links()
+        pending = [ln for ln in links if ln.get("spec") and not ln.get("dispatched")]
+        if not pending:
+            return "No pending planned-dispatch links. Create one with portfolio_link(..., title=, spec=)."
+        from graph.fleet import supervisor
+
+        by_board, unreachable = await _fetch_all(supervisor.list_remotes())
+        done = {
+            (name, f["id"])
+            for name, feats in by_board.items()
+            for f in feats
+            if f.get("id") and f.get("board_state") == "done"
+        }
+        ready = [
+            ln for ln in pending if ln["to_board"] not in unreachable and (ln["to_board"], ln["to_feature"]) in done
+        ]
+        if not ready:
+            return "Nothing to auto-dispatch — every planned link is still blocked (or its blocker's board is unreachable)."
+        if dry_run:
+            return json.dumps(
+                {"would_dispatch": [{"id": ln["id"], "board": ln["from_board"], "title": ln["title"]} for ln in ready]},
+                indent=2,
+            )
+        results = []
+        for ln in ready:
+            rec = _remote_by_name(ln["from_board"])
+            if rec is None:
+                results.append({"id": ln["id"], "board": ln["from_board"], "error": "board no longer registered"})
+                continue
+            try:
+                reply = await _a2a_create_feature(
+                    rec, ln["title"], ln["spec"], ln.get("acceptance_criteria", ""), ln.get("files_to_modify", "")
+                )
+            except Exception as exc:  # noqa: BLE001 — report per-link; don't sink the batch
+                results.append({"id": ln["id"], "board": ln["from_board"], "error": str(exc)})
+                continue
+            ln["dispatched"] = True  # idempotency: don't re-create on the next run
+            results.append(
+                {
+                    "id": ln["id"],
+                    "board": ln["from_board"],
+                    "title": ln["title"],
+                    "dispatched": True,
+                    "reply": reply[:200],
+                }
+            )
+        _save_links(links)
+        return json.dumps(results, indent=2)
+
     return [
         portfolio_boards,
         portfolio_dispatch,
@@ -575,4 +668,5 @@ def _tools() -> list:
         portfolio_watch,
         portfolio_link,
         portfolio_plan,
+        portfolio_autodispatch,
     ]

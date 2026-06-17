@@ -21,8 +21,9 @@ team-agent registry), **delegates** (the A2A dispatch primitive), and **project_
 | `portfolio_rollup([boards])` | Bounded cross-board view — per-board lane counts + only blocked / critical-path items |
 | `portfolio_diff([boards])` | What changed since the last check — merged / newly-blocked / unblocked / new |
 | `portfolio_watch([interval_min, boards])` | Baseline now, then the `schedule_task` cron to run `portfolio_diff` on a schedule |
-| `portfolio_link(from_board, from_feature, to_board, to_feature[, note, remove])` | Record (or remove) a cross-board dependency |
+| `portfolio_link(from_board, from_feature, to_board, to_feature[, note, title, spec, …, remove])` | Record (or remove) a cross-board dependency; with `title`+`spec` it's a *planned dispatch* (held work) |
 | `portfolio_plan()` | The cross-board dependency graph + what's ready to dispatch next |
+| `portfolio_autodispatch([dry_run])` | Create each planned link's held work once its blocker ships — idempotent, schedulable |
 
 ## Install
 
