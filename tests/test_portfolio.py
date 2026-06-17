@@ -173,6 +173,7 @@ def test_register_exposes_the_tools():
         "portfolio_watch",
         "portfolio_link",
         "portfolio_plan",
+        "portfolio_autodispatch",
     }
 
 
@@ -515,3 +516,141 @@ async def test_plan_empty(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pf, "_links_path", lambda: tmp_path / "links.json")
     assert "No cross-board links yet" in await _tool("portfolio_plan").ainvoke({})
+
+
+# ── portfolio_link planned-dispatch + portfolio_autodispatch (close the loop) ─
+
+
+def test_link_planned_dispatch_carries_the_spec(monkeypatch, tmp_path):
+    _patch_links(monkeypatch, tmp_path)
+    out = json.loads(
+        _tool("portfolio_link").invoke(
+            {
+                "from_board": "team-web",
+                "from_feature": "render-v2",  # a planning label, not yet on the board
+                "to_board": "team-api",
+                "to_feature": "a1",
+                "title": "Render users from /v2",
+                "spec": "Wire the UI to /v2/users",
+            }
+        )
+    )
+    assert out["dispatched"] is False and out["title"] == "Render users from /v2"
+    stored = json.loads((tmp_path / "links.json").read_text())[0]
+    assert stored["spec"] == "Wire the UI to /v2/users" and stored["from_feature"] == "render-v2"
+
+
+def _planned_link(tmp_path, **over):
+    base = {
+        "id": "l1",
+        "from_board": "team-web",
+        "from_feature": "render-v2",
+        "to_board": "team-api",
+        "to_feature": "a1",
+        "note": "",
+        "title": "Render users from /v2",
+        "spec": "Wire the UI to /v2/users",
+        "acceptance_criteria": "",
+        "files_to_modify": "",
+        "dispatched": False,
+    }
+    base.update(over)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_autodispatch_creates_held_work_when_blocker_ships(monkeypatch, tmp_path):
+    import portfolio as pf
+
+    _patch_links(monkeypatch, tmp_path)
+    pf._save_links([_planned_link(tmp_path)])
+
+    # the blocker (team-api:a1) has shipped → done
+    async def fake_fetch(rec, state=""):
+        return [{"id": "a1", "board_state": "done"}] if rec["name"] == "team-api" else []
+
+    monkeypatch.setattr(pf, "_fetch_board_features", fake_fetch)
+
+    dispatched = []
+
+    async def fake_create(rec, title, spec, ac="", files=""):
+        dispatched.append((rec["name"], title))
+        return f"Created on {rec['name']}: {title}"
+
+    monkeypatch.setattr(pf, "_a2a_create_feature", fake_create)
+
+    out = json.loads(await _tool("portfolio_autodispatch").ainvoke({}))
+    assert dispatched == [("team-web", "Render users from /v2")]  # held work created on its board
+    assert out[0]["dispatched"] is True
+    # idempotent: the link is now flagged → a second run dispatches nothing
+    assert json.loads((tmp_path / "links.json").read_text())[0]["dispatched"] is True
+    dispatched.clear()
+    again = await _tool("portfolio_autodispatch").ainvoke({})
+    assert dispatched == [] and "No pending" in again
+
+
+@pytest.mark.asyncio
+async def test_autodispatch_holds_while_blocked_and_dry_run(monkeypatch, tmp_path):
+    import portfolio as pf
+
+    _patch_links(monkeypatch, tmp_path)
+    pf._save_links([_planned_link(tmp_path)])
+
+    # blocker NOT done yet
+    async def fake_fetch(rec, state=""):
+        return [{"id": "a1", "board_state": "in_progress"}] if rec["name"] == "team-api" else []
+
+    monkeypatch.setattr(pf, "_fetch_board_features", fake_fetch)
+
+    called = []
+    monkeypatch.setattr(pf, "_a2a_create_feature", lambda *a, **k: called.append(1))
+
+    assert "still blocked" in await _tool("portfolio_autodispatch").ainvoke({})
+    assert called == []  # held — nothing dispatched while the blocker is open
+
+    # now it ships; dry_run previews without dispatching or flagging
+    async def fake_done(rec, state=""):
+        return [{"id": "a1", "board_state": "done"}] if rec["name"] == "team-api" else []
+
+    monkeypatch.setattr(pf, "_fetch_board_features", fake_done)
+    preview = json.loads(await _tool("portfolio_autodispatch").ainvoke({"dry_run": True}))
+    assert preview["would_dispatch"][0]["board"] == "team-web"
+    assert called == []  # dry run dispatched nothing
+    assert json.loads((tmp_path / "links.json").read_text())[0]["dispatched"] is False  # not flagged
+
+
+@pytest.mark.asyncio
+async def test_autodispatch_ignores_advisory_only_links(monkeypatch, tmp_path):
+    import portfolio as pf
+
+    _patch_links(monkeypatch, tmp_path)
+    # an advisory link (no spec) — autodispatch must never touch it
+    pf._save_links(
+        [
+            {
+                "id": "l1",
+                "from_board": "team-web",
+                "from_feature": "w1",
+                "to_board": "team-api",
+                "to_feature": "a1",
+                "note": "",
+            }
+        ]
+    )
+    assert "No pending planned-dispatch links" in await _tool("portfolio_autodispatch").ainvoke({})
+
+
+@pytest.mark.asyncio
+async def test_plan_excludes_dispatched_planned_links(monkeypatch, tmp_path):
+    import portfolio as pf
+
+    _patch_links(monkeypatch, tmp_path)
+    pf._save_links([_planned_link(tmp_path, dispatched=True)])
+
+    async def fake_fetch(rec, state=""):
+        return [{"id": "a1", "board_state": "done"}] if rec["name"] == "team-api" else []
+
+    monkeypatch.setattr(pf, "_fetch_board_features", fake_fetch)
+    plan = json.loads(await _tool("portfolio_plan").ainvoke({}))
+    assert plan["links"][0]["dispatched"] is True
+    assert plan["ready_to_dispatch"] == [] and plan["blocked"] == []  # already dispatched → off the work lists
