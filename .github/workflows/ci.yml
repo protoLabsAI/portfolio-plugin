@@ -1,0 +1,30 @@
+name: CI
+
+# Lint + test the plugin, standalone (the host seams are stubbed in conftest). Runs on
+# the org's Namespace Linux profile to keep CI cost down; a fork without that profile
+# falls back to a hosted runner via the NSC_RUNNER repo variable.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ vars.NSC_RUNNER || 'namespace-profile-protolabs-linux' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt ruff==0.15.10
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Test
+        run: pytest -q

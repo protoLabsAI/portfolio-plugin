@@ -1,0 +1,24 @@
+[project]
+name = "portfolio"
+version = "0.4.0"
+description = "Multi-team orchestration plugin for protoAgent — one PM agent dispatches to, rolls up, watches, and sequences MANY team-agents' project boards over A2A (ADR 0055)."
+requires-python = ">=3.11"
+
+# Runtime deps come from the protoAgent host (langchain-core; the fleet, delegates,
+# and project_board plugins). This plugin adds no pip deps — it's pure composition.
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E402", "E501", "E702", "E731", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]
