@@ -208,7 +208,18 @@ async def test_spinup_uses_config_team_template(fleet, template, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_spinup_requires_a_template(fleet, tmp_path):
+async def test_spinup_defaults_to_the_shipped_template(fleet, tmp_path):
+    """With no template arg / config, spinup falls back to the plugin's shipped example."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = json.loads(await _tool("portfolio_spinup_team").ainvoke({"name": "x", "repo": str(repo)}))
+    assert out["team"] == "x"
+    assert portfolio._default_template().endswith("examples/team-template")
+
+
+@pytest.mark.asyncio
+async def test_spinup_errors_when_no_template_at_all(fleet, tmp_path, monkeypatch):
+    monkeypatch.setattr(portfolio, "_default_template", lambda: "")  # simulate no shipped default
     repo = tmp_path / "repo"
     repo.mkdir()
     out = await _tool("portfolio_spinup_team").ainvoke({"name": "x", "repo": str(repo)})
