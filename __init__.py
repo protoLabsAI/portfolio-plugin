@@ -39,11 +39,14 @@ def register(registry) -> None:
 
 
 def _remote_by_name(name: str) -> dict | None:
-    """The remote-member record (token INCLUDED) for a board name/id, or None.
+    """The board record ``{name, id, url, token}`` for a board name/id, or None.
 
-    A board is addressed by the remote fleet member's name (ADR 0055 §2). Uses
-    ``list_remotes()`` (not ``status()``) because dispatch + read need the stored
-    bearer, which ``status()`` strips.
+    A board is either a REMOTE fleet member (an external instance — carries a stored
+    bearer) or a LOCAL fleet member (a workspace this PM spawned + runs — addressed on
+    ``127.0.0.1:<port>``, no token). Remotes are checked first (they carry auth) via
+    ``list_remotes()``; local members come from ``status()``, which a spawned team joins
+    automatically once started — so a locally-spawned team is dispatchable WITHOUT being
+    (mis)registered as a remote, which would collide with its own workspace name.
     """
     from graph.fleet import supervisor
 
@@ -53,6 +56,11 @@ def _remote_by_name(name: str) -> dict | None:
     for rec in supervisor.list_remotes():
         if rec.get("name") == name or rec.get("id") == name:
             return rec
+    for m in supervisor.status():
+        if m.get("host") or m.get("remote"):
+            continue  # the PM itself / remotes already handled above
+        if (m.get("name") == name or m.get("id") == name) and m.get("port"):
+            return {"name": m["name"], "id": m.get("id"), "url": f"http://127.0.0.1:{m['port']}", "token": ""}
     return None
 
 
@@ -907,20 +915,17 @@ def _tools(cfg: dict | None = None) -> list:
             await asyncio.to_thread(manager.remove, wid, purge=True)
             return f"Error binding repo into team config: {exc}"
 
-        # 3. start the agent, register it as a remote board, wait for it to come up
+        # 3. start the agent (it joins the fleet as a local member) + wait for it to come up.
+        # No add_remote: a local workspace is already an addressable fleet member, and
+        # registering it as a "remote" would collide with its own workspace name.
         try:
             rec = await asyncio.to_thread(supervisor.start, wid)
             assigned = rec.get("port", assigned)
             base = f"http://127.0.0.1:{assigned}"
-            supervisor.add_remote(name, base)
             ready = await _await_ready(base)
         except Exception as exc:  # noqa: BLE001 — best-effort rollback so a retry isn't poisoned
             try:
                 await asyncio.to_thread(supervisor.stop, wid)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                supervisor.remove_remote(name)
             except Exception:  # noqa: BLE001
                 pass
             await asyncio.to_thread(manager.remove, wid, purge=True)
