@@ -174,6 +174,10 @@ def test_register_exposes_the_tools():
         "portfolio_link",
         "portfolio_plan",
         "portfolio_autodispatch",
+        "portfolio_spinup_team",
+        "portfolio_teams",
+        "portfolio_teardown_team",
+        "portfolio_autodispose",
     }
 
 

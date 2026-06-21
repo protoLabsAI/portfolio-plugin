@@ -1,6 +1,6 @@
 id: portfolio
 name: Portfolio (multi-team orchestration)
-version: 0.5.0
+version: 0.6.0
 description: >-
   The PM / program orchestration layer (ADR 0055 P1). One agent orchestrates work
   across MANY team-agents, each running its own project board for its own repo
@@ -23,9 +23,25 @@ description: >-
   with `plugins: { enabled: [portfolio] }`. Pairs with the `delegates` plugin and
   remote fleet members (ADR 0042). See ADR 0055.
 
+  Team spawning (v0.6): portfolio_spinup_team stands up an EPHEMERAL team-agent on
+  demand — it clones a base team config template into a scoped workspace (ADR 0041),
+  binds a repo, starts the agent (ADR 0042 fleet supervisor) and registers it as a
+  board, so a PM can spin teams up per project. portfolio_teardown_team disposes one;
+  portfolio_autodispose closes the one-shot lifecycle (a team self-disposes once its
+  board drains); portfolio_teams lists the spawned teams.
+
 enabled: false
 min_protoagent_version: "0.42.0"
+
+# Config (ADR 0019) — defaults; a langgraph-config.yaml overlays them.
+config:
+  # Base team config for portfolio_spinup_team — a path to a langgraph-config.yaml (or its
+  # config dir; a sibling secrets.yaml is cloned too). It carries the team's plugins
+  # (project_board + delegates) and coder ladder; the {{REPO}} / {{TEAM_NAME}} / {{GATE}}
+  # sentinels in it are filled per spawn. Leave empty to require an explicit template= arg.
+  team_template: ""
 
 # Declarative only (console transparency).
 capabilities:
   network: ["*"]   # A2A dispatch + project_board reads to remote team-agents
+  filesystem: ["~/.protoagent/workspaces/*"]  # spinup/teardown manage scoped team workspaces

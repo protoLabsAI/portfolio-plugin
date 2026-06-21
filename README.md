@@ -24,6 +24,52 @@ team-agent registry), **delegates** (the A2A dispatch primitive), and **project_
 | `portfolio_link(from_board, from_feature, to_board, to_feature[, note, title, spec, …, remove])` | Record (or remove) a cross-board dependency; with `title`+`spec` it's a *planned dispatch* (held work) |
 | `portfolio_plan()` | The cross-board dependency graph + what's ready to dispatch next |
 | `portfolio_autodispatch([dry_run])` | Create each planned link's held work once its blocker ships — idempotent, schedulable |
+| `portfolio_spinup_team(name, repo[, template, gate, port, auto_dispose])` | **Spin up an ephemeral team** — clone a base team config into a scoped workspace, bind the repo, start + register it as a board |
+| `portfolio_teams()` | List the teams this PM spawned + each one's board drain status |
+| `portfolio_teardown_team(name)` | Stop + purge a spawned team (workspace + scoped data); the repo + its PRs are untouched |
+| `portfolio_autodispose([dry_run])` | Tear down every spawned team whose board has **drained** (all work done) — the one-shot lifecycle, schedulable |
+
+## Ephemeral teams (spin up on demand)
+
+A PM doesn't just dispatch to *standing* teams — it can **spawn a finite-lifetime team
+for a project, dispatch work to it, and dispose it when the board drains**. This is the
+in-process counterpart of the `team-up.sh` / `team-down.sh` scripts: same primitives
+(`graph.workspaces.manager` + `graph.fleet.supervisor`), driven by a tool the agent calls.
+
+```
+portfolio_spinup_team(name="docs-team", repo="/Users/me/dev/protoLibrary", gate="npm run docs:build")
+  → clones the team template into a scoped workspace, binds the repo, starts the agent,
+    registers it as a board, and returns its A2A endpoint.
+portfolio_dispatch(board="docs-team", title=…, spec=…)    # send it work
+portfolio_autodispose()                                   # once its board drains, it's torn down
+```
+
+**The team template.** `portfolio_spinup_team` clones a base team `langgraph-config.yaml`
+(the team's plugins — `project_board` + `delegates` — and its coder ladder), filling these
+per-spawn sentinels — comment-preserving, so the template stays readable:
+
+| Sentinel | Filled with |
+|---|---|
+| `{{REPO}}` | the `repo` argument (omit `repo` to keep a prebuilt template's baked-in repo) |
+| `{{TEAM_NAME}}` | the `name` argument |
+| `{{GATE}}` | the `gate` argument (the pre-PR check command; empty = none) |
+
+Point `portfolio.team_template` at it (or pass `template=` per call):
+
+```yaml
+# langgraph-config.yaml — on the PM agent
+plugins:
+  enabled: [delegates, portfolio]
+portfolio:
+  team_template: /Users/me/dev/portfolio-plugin/examples/team-template
+```
+
+A ready-to-copy example (config + `secrets.example.yaml`) lives in
+[`examples/team-template/`](examples/team-template/). **Prebuilt repo-teams** for a
+long-running repo are just a template with the repo baked in (no `{{REPO}}`) — spin one up
+by name with no `repo` argument. **Auto-dispose** only ever touches teams *this PM spawned*
+with `auto_dispose=True`, and never an empty board (a team with no work yet) — so a
+hand-registered standing team and a just-spawned team are both safe.
 
 ## Install
 

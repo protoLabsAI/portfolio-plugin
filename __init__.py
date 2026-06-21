@@ -27,12 +27,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 from langchain_core.tools import tool
 
 
 def register(registry) -> None:
-    for t in _tools():
+    cfg = getattr(registry, "config", None) or {}
+    for t in _tools(cfg):
         registry.register_tool(t)
 
 
@@ -319,7 +321,142 @@ async def _a2a_create_feature(
     )
 
 
-def _tools() -> list:
+# ── Ephemeral engineering teams (spin up / tear down / auto-dispose) ──────────────
+# The PM spawns a finite-lifetime team for a project: clone a base TEAM config template
+# into a scoped workspace (ADR 0041), bind the repo, start the agent (ADR 0042 fleet
+# supervisor), and register it as a remote board — so the existing portfolio_* tools
+# dispatch to it. Tear it down by hand (portfolio_teardown_team) or let it self-dispose
+# when its board drains (portfolio_autodispose). All in-process over the SAME primitives
+# team-up.sh uses by hand: graph.workspaces.manager + graph.fleet.supervisor.
+
+
+def _now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _teams_path():
+    """Registry of teams THIS PM spawned — scoped under the PM's data root (ADR 0004),
+    mirroring portfolio_links.json / portfolio_snapshot.json. It's how teardown +
+    autodispose tell a portfolio-spawned ephemeral team from a hand-registered remote
+    (which must never be auto-disposed)."""
+    from infra.paths import data_home, scope_leaf
+
+    return scope_leaf(data_home() / "portfolio_teams.json")
+
+
+def _load_teams() -> list:
+    p = _teams_path()
+    try:
+        return json.loads(p.read_text()) if p.exists() else []
+    except Exception:  # noqa: BLE001 — a corrupt registry shouldn't break the tools
+        return []
+
+
+def _save_teams(teams: list) -> None:
+    from infra.paths import atomic_write
+
+    p = _teams_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(p, json.dumps(teams, indent=2))
+
+
+def _record_team(rec: dict) -> None:
+    teams = [t for t in _load_teams() if t.get("name") != rec["name"]]
+    teams.append(rec)
+    _save_teams(teams)
+
+
+def _forget_team(name: str) -> None:
+    _save_teams([t for t in _load_teams() if t.get("name") != name])
+
+
+def _team_by_name(name: str) -> dict | None:
+    return next((t for t in _load_teams() if t.get("name") == name), None)
+
+
+def _apply_team_bindings(cfg_path: Path, repo: str, name: str, gate: str) -> None:
+    """Fill the per-spawn sentinels in the cloned team config (comment-preserving, the
+    same plain-string-replace team-up.sh uses): ``{{REPO}}`` → the repo path (only when a
+    repo is given, so a prebuilt repo-baked template is left untouched), ``{{TEAM_NAME}}``
+    → the team name, ``{{GATE}}`` → the pre-PR gate command (or empty)."""
+    t = cfg_path.read_text()
+    if repo:
+        t = t.replace("{{REPO}}", repo)
+    t = t.replace("{{TEAM_NAME}}", name)
+    t = t.replace("{{GATE}}", gate or "")
+    cfg_path.write_text(t)
+
+
+def _beads_init(repo: str) -> None:
+    """Best-effort ``br init`` so the team's board pins to its repo (not a parent dir's
+    .beads). Guarded + non-fatal: skipped if the repo already has a .beads or ``br``
+    isn't installed — the board still runs, it just may resolve a parent workspace."""
+    import os
+    import subprocess
+
+    if (Path(repo) / ".beads").exists():
+        return
+    br = os.environ.get("BR_BIN", "br")
+    try:
+        subprocess.run([br, "init"], cwd=repo, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+async def _await_ready(base: str, timeout: float = 40.0) -> bool:
+    """Poll a freshly-started team's ``/healthz`` until it's up (or timeout). A spawned
+    server boots its plugins asynchronously, so the returned A2A endpoint isn't dispatch-
+    able the instant start() returns — this makes the tool hand back a usable endpoint."""
+    import time
+
+    import httpx
+
+    end = time.monotonic() + timeout
+    async with httpx.AsyncClient(timeout=3) as client:
+        while time.monotonic() < end:
+            try:
+                r = await client.get(f"{base}/healthz")
+                if r.status_code == 200:
+                    return True
+            except Exception:  # noqa: BLE001 — not up yet; keep polling
+                pass
+            await asyncio.sleep(1.0)
+    return False
+
+
+def _dispose(team: dict) -> dict:
+    """Stop the team's server, purge its workspace + scoped data, unregister the fleet
+    remote, and forget it. Best-effort per step (a partial failure still cleans what it
+    can). The managed repo + any PRs it opened are UNTOUCHED. Blocking (supervisor.stop
+    busy-waits) — call via ``asyncio.to_thread``."""
+    from graph.fleet import supervisor
+    from graph.workspaces import manager
+
+    out = {"team": team["name"]}
+    try:
+        supervisor.stop(team["id"])
+        out["stopped"] = True
+    except Exception as exc:  # noqa: BLE001 — already-stopped/unknown is fine; report it
+        out["stop_error"] = str(exc)
+    try:
+        manager.remove(team["id"], purge=True)
+        out["purged"] = True
+    except Exception as exc:  # noqa: BLE001
+        out["remove_error"] = str(exc)
+    try:
+        supervisor.remove_remote(team["name"])
+        out["unregistered"] = True
+    except Exception:  # noqa: BLE001 — remote may already be gone
+        pass
+    _forget_team(team["name"])
+    return out
+
+
+def _tools(cfg: dict | None = None) -> list:
+    cfg = cfg or {}
+
     @tool
     def portfolio_boards() -> str:
         """List the team boards you can orchestrate. Each is a remote team-agent — its
@@ -659,6 +796,213 @@ def _tools() -> list:
         _save_links(links)
         return json.dumps(results, indent=2)
 
+    @tool
+    async def portfolio_spinup_team(
+        name: str,
+        repo: str = "",
+        template: str = "",
+        gate: str = "",
+        port: int = 0,
+        auto_dispose: bool = True,
+    ) -> str:
+        """Spin up an EPHEMERAL engineering team for a project — a finite-lifetime team-
+        agent you spawn on demand, dispatch work to, and dispose when the board drains.
+
+        It clones a base TEAM config ``template`` (a langgraph-config.yaml that carries the
+        team's plugins — project_board + delegates — and its coder ladder) into a scoped
+        workspace, binds ``repo`` into it (filling the ``{{REPO}}`` / ``{{TEAM_NAME}}`` /
+        ``{{GATE}}`` sentinels in the template), starts the agent, and registers it as a
+        team board — so the existing portfolio_dispatch / portfolio_board_read / rollup
+        tools address it by ``name``.
+
+        Args:
+            name: The team name (also its fleet/A2A name + board prefix). Must be unique.
+            repo: Absolute path to the repo the team's board manages. Omit only for a
+                prebuilt template that already bakes its repo in.
+            template: Path to the base team langgraph-config.yaml (or its config dir; a
+                sibling secrets.yaml is cloned too). Defaults to the ``portfolio.team_template``
+                config value — set that and you can omit it here.
+            gate: Pre-PR gate command for the team (fills ``{{GATE}}``). Optional.
+            port: Bind port (0 = auto-assign the next free fleet port).
+            auto_dispose: If true (default), portfolio_autodispose will tear this team
+                down once its board drains. Set false for a team you'll dispose by hand.
+
+        Returns the team's name, port, A2A endpoint, and the next-step dispatch call.
+        """
+        from graph.fleet import supervisor
+        from graph.workspaces import manager
+
+        name = (name or "").strip()
+        if not name:
+            return "Error: a team name is required."
+        if _remote_by_name(name) is not None or _team_by_name(name) is not None:
+            return f"Error: a team/board named {name!r} already exists. Pick another name or tear it down first."
+        tmpl = (template or "").strip() or str(cfg.get("team_template", "") or "")
+        if not tmpl:
+            return (
+                "Error: no team template. Pass template=<path to a base team langgraph-config.yaml> or set "
+                "portfolio.team_template in config. The template carries project_board + delegates + the coder "
+                "ladder; its {{REPO}} / {{TEAM_NAME}} / {{GATE}} sentinels are filled per spawn."
+            )
+        if not Path(tmpl).expanduser().exists():
+            return f"Error: team template not found: {tmpl}"
+        repo_abs = ""
+        if repo:
+            repo_abs = str(Path(repo).expanduser().resolve())
+            if not Path(repo_abs).is_dir():
+                return f"Error: repo path not found: {repo}"
+
+        # 1. clone the template into a scoped workspace (config + secrets, identity restamped)
+        try:
+            ws = await asyncio.to_thread(manager.create, name, from_config=tmpl, port=(port or None))
+        except Exception as exc:  # noqa: BLE001 — surface the create failure
+            return f"Error creating team workspace: {exc}"
+        wid = ws["id"]
+        assigned = ws["port"]
+
+        # 2. bind the repo into the cloned config (+ beads init); roll back the workspace on failure
+        try:
+            _apply_team_bindings(Path(ws["path"]) / "langgraph-config.yaml", repo_abs, name, gate)
+            if repo_abs:
+                _beads_init(repo_abs)
+        except Exception as exc:  # noqa: BLE001
+            await asyncio.to_thread(manager.remove, wid, purge=True)
+            return f"Error binding repo into team config: {exc}"
+
+        # 3. start the agent, register it as a remote board, wait for it to come up
+        try:
+            rec = await asyncio.to_thread(supervisor.start, wid)
+            assigned = rec.get("port", assigned)
+            base = f"http://127.0.0.1:{assigned}"
+            supervisor.add_remote(name, base)
+            ready = await _await_ready(base)
+        except Exception as exc:  # noqa: BLE001 — best-effort rollback so a retry isn't poisoned
+            try:
+                await asyncio.to_thread(supervisor.stop, wid)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                supervisor.remove_remote(name)
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.to_thread(manager.remove, wid, purge=True)
+            return f"Error starting team: {exc}"
+
+        _record_team(
+            {
+                "name": name,
+                "id": wid,
+                "port": assigned,
+                "repo": repo_abs,
+                "auto_dispose": bool(auto_dispose),
+                "spawned_at": _now(),
+            }
+        )
+        return json.dumps(
+            {
+                "team": name,
+                "id": wid,
+                "port": assigned,
+                "a2a": f"{base}/a2a",
+                "repo": repo_abs,
+                "auto_dispose": bool(auto_dispose),
+                "ready": ready,
+                "next": (
+                    f"Send work with portfolio_dispatch(board={name!r}, title=..., spec=...). "
+                    f"Dispose with portfolio_teardown_team({name!r}), or it self-disposes "
+                    "(portfolio_autodispose) once its board drains."
+                    + ("" if ready else " NOTE: still booting — give it a moment before dispatching.")
+                ),
+            },
+            indent=2,
+        )
+
+    @tool
+    async def portfolio_teams() -> str:
+        """List the ephemeral teams THIS PM spawned (via portfolio_spinup_team) with their
+        repo, port, auto-dispose flag, and current board drain status (active/done). Distinct
+        from portfolio_boards, which lists ALL fleet members — including ones registered by
+        hand, which portfolio never auto-disposes."""
+        teams = _load_teams()
+        if not teams:
+            return "No spawned teams. Use portfolio_spinup_team(name, repo, template=...) to create one."
+        out = []
+        for t in teams:
+            row = {
+                "team": t["name"],
+                "repo": t.get("repo", ""),
+                "port": t.get("port"),
+                "auto_dispose": bool(t.get("auto_dispose")),
+                "a2a": f"http://127.0.0.1:{t.get('port')}/a2a",
+            }
+            rec = _remote_by_name(t["name"])
+            if rec is None:
+                row["status"] = "remote missing (stale entry — teardown to clear)"
+            else:
+                try:
+                    feats = await _fetch_board_features(rec)
+                    done = sum(1 for f in feats if f.get("board_state") == "done")
+                    row["board"] = {
+                        "total": len(feats),
+                        "done": done,
+                        "active": len(feats) - done,
+                        "drained": len(feats) > 0 and done == len(feats),
+                    }
+                except _BoardUnavailable as exc:
+                    row["board"] = f"unreadable ({exc})"
+            out.append(row)
+        return json.dumps(out, indent=2)
+
+    @tool
+    async def portfolio_teardown_team(name: str) -> str:
+        """Tear down an ephemeral team this PM spawned: stop its server, purge its workspace
+        + scoped data, and unregister the fleet remote. The managed repo and any PRs it
+        opened are NOT touched. Only teams from portfolio_spinup_team are disposable here —
+        a hand-registered remote is removed from the console, not here."""
+        name = (name or "").strip()
+        team = _team_by_name(name)
+        if team is None:
+            return (
+                f"Error: {name!r} is not a portfolio-spawned team (see portfolio_teams). A manually-"
+                "registered remote board is removed from the console / POST /api/fleet/remotes, not here."
+            )
+        out = await asyncio.to_thread(_dispose, team)
+        return json.dumps(out, indent=2)
+
+    @tool
+    async def portfolio_autodispose(dry_run: bool = False) -> str:
+        """Close the one-shot lifecycle: tear down every ephemeral team whose board has
+        DRAINED — work was dispatched and every feature reached done (merged), with nothing
+        left active. Only ``auto_dispose`` teams spawned via portfolio_spinup_team are
+        considered, and a team with no work yet (empty board) is NEVER disposed. Idempotent
+        + schedulable: pair it with a cron (like portfolio_watch) so finite projects clean
+        themselves up. Pass dry_run=True to preview."""
+        teams = [t for t in _load_teams() if t.get("auto_dispose")]
+        if not teams:
+            return "No auto-dispose teams. Spin one up with portfolio_spinup_team(auto_dispose=True)."
+        drained, kept = [], []
+        for t in teams:
+            rec = _remote_by_name(t["name"])
+            if rec is None:
+                _forget_team(t["name"])  # remote vanished — prune the stale entry
+                kept.append({"team": t["name"], "status": "remote missing — pruned"})
+                continue
+            try:
+                feats = await _fetch_board_features(rec)
+            except _BoardUnavailable as exc:
+                kept.append({"team": t["name"], "status": f"unreadable ({exc}) — left up"})
+                continue
+            total = len(feats)
+            done = sum(1 for f in feats if f.get("board_state") == "done")
+            if total > 0 and done == total:
+                drained.append(t)
+            else:
+                kept.append({"team": t["name"], "active": total - done, "done": done})
+        if dry_run:
+            return json.dumps({"would_dispose": [t["name"] for t in drained], "kept": kept}, indent=2)
+        disposed = [await asyncio.to_thread(_dispose, t) for t in drained]
+        return json.dumps({"disposed": disposed, "kept": kept}, indent=2)
+
     return [
         portfolio_boards,
         portfolio_dispatch,
@@ -669,4 +1013,8 @@ def _tools() -> list:
         portfolio_link,
         portfolio_plan,
         portfolio_autodispatch,
+        portfolio_spinup_team,
+        portfolio_teams,
+        portfolio_teardown_team,
+        portfolio_autodispose,
     ]
