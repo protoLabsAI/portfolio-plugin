@@ -417,9 +417,9 @@ def _beads_init(repo: str) -> None:
 # (memory/, session-notes.md, repo-map-cache.json) with protoCLI-MANAGED state
 # (.proto/evolve/ holds skills). A blanket `.proto/` ignore would hide the skills, so we
 # ignore ONLY the session artifacts — otherwise the coder leaks them into its PR (bug #49).
-_PROTO_GITIGNORE_MARKER = "# proto coding-agent per-session scratch"
-_PROTO_GITIGNORE_BLOCK = (
-    f"\n{_PROTO_GITIGNORE_MARKER} (NOT the whole .proto — .proto/evolve holds protoCLI-managed\n"
+_PROTO_SCRATCH_MARKER = "# proto coding-agent per-session scratch"
+_PROTO_SCRATCH_BLOCK = (
+    f"\n{_PROTO_SCRATCH_MARKER} (NOT the whole .proto — .proto/evolve holds protoCLI-managed\n"
     "# skills that should be versioned; only the session artifacts are ignored)\n"
     ".proto/memory/\n"
     ".proto/session-notes.md\n"
@@ -427,24 +427,30 @@ _PROTO_GITIGNORE_BLOCK = (
 )
 
 
-def _ensure_proto_gitignore(repo: str) -> None:
-    """Make the team's repo ignore the proto coding agent's per-session scratch so its PRs
-    don't leak it (bug #49) — WITHOUT ignoring the whole ``.proto/`` dir, which also holds
-    protoCLI-managed skills (``.proto/evolve``) that should be versioned. Idempotent (a
-    marker guards re-adds). NARROWS any pre-existing blanket ``.proto/`` ignore, since that
-    would hide the skills. Best-effort + non-fatal."""
+def _exclude_proto_scratch(repo: str) -> None:
+    """Make the team's repo + the coder's worktrees ignore the proto coding agent's
+    per-session scratch so its PRs don't leak it (bug #49) — WITHOUT ignoring the whole
+    ``.proto/`` dir, which also holds protoCLI-managed skills (``.proto/evolve``) that should
+    be versioned.
+
+    Writes to ``.git/info/exclude`` (NOT ``.gitignore``): it's per-repo, never committed (no
+    churn in the repo's tracked files), and — crucially — shared by every worktree via the
+    common git dir, so the coder's branch worktree honors it. An uncommitted ``.gitignore``
+    in the main tree would NOT reach that worktree (a fresh checkout off HEAD). Idempotent
+    (marker-guarded); main repo only (a worktree's ``.git`` is a file). Best-effort."""
     try:
-        gi = Path(repo) / ".gitignore"
-        text = gi.read_text() if gi.exists() else ""
-        if _PROTO_GITIGNORE_MARKER in text:
+        git = Path(repo) / ".git"
+        if not git.is_dir():
             return
-        # Drop any blanket `.proto` / `.proto/` line — it would shadow the selective ignore
-        # (and hide .proto/evolve skills). Leave inline-commented or more-specific lines.
-        kept = [ln for ln in text.splitlines() if ln.strip().rstrip("/") != ".proto"]
-        text = "\n".join(kept)
+        info = git / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        excl = info / "exclude"
+        text = excl.read_text() if excl.exists() else ""
+        if _PROTO_SCRATCH_MARKER in text:
+            return
         if text and not text.endswith("\n"):
             text += "\n"
-        gi.write_text(text + _PROTO_GITIGNORE_BLOCK)
+        excl.write_text(text + _PROTO_SCRATCH_BLOCK)
     except OSError:
         pass
 
@@ -957,7 +963,7 @@ def _tools(cfg: dict | None = None) -> list:
             _ensure_plugins_dir(cfg_path, pdir)
             if repo_abs:
                 _beads_init(repo_abs)
-                _ensure_proto_gitignore(repo_abs)
+                _exclude_proto_scratch(repo_abs)
         except Exception as exc:  # noqa: BLE001
             await asyncio.to_thread(manager.remove, wid, purge=True)
             return f"Error binding repo into team config: {exc}"
