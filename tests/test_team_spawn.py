@@ -56,12 +56,13 @@ def template(tmp_path):
 
 @pytest.fixture
 def fleet(monkeypatch, tmp_path):
-    """A fake fleet: manager.create copies the template into a tmp workspace; start/stop/
-    add_remote/remove_remote/list_remotes operate on an in-memory remotes dict."""
+    """A fake fleet: manager.create copies the template into a tmp workspace + records it;
+    start marks it running so it joins status() as a LOCAL member (how a spawned team
+    becomes dispatchable — no add_remote); list_remotes is for external members only."""
     from graph.fleet import supervisor
     from graph.workspaces import manager
 
-    state: dict = {"remotes": {}, "started": [], "stopped": [], "removed": []}
+    state: dict = {"remotes": {}, "workspaces": {}, "running": set(), "started": [], "stopped": [], "removed": []}
 
     def fake_create(name, *, from_config=None, port=None, **k):
         ws = tmp_path / "ws" / name
@@ -69,34 +70,48 @@ def fleet(monkeypatch, tmp_path):
         src = Path(from_config)
         src = src if src.is_file() else src / "langgraph-config.yaml"
         shutil.copyfile(src, ws / "langgraph-config.yaml")
-        return {"id": f"{name}-abcd", "name": name, "port": port or 7874, "path": str(ws)}
+        rec = {"id": f"{name}-abcd", "name": name, "port": port or 7874, "path": str(ws)}
+        state["workspaces"][rec["id"]] = rec
+        return rec
 
     def fake_start(ident):
         state["started"].append(ident)
-        return {"id": ident, "port": 7874, "running": True}
-
-    def fake_add_remote(name, url, token=""):
-        state["remotes"][name] = {"id": name, "name": name, "url": url.rstrip("/"), "token": token}
-        return {"name": name}
-
-    def fake_remove_remote(ident):
-        state["removed"].append(ident)
-        state["remotes"].pop(ident, None)
-        return {"name": ident, "removed": ["remote"]}
+        state["running"].add(ident)
+        ws = state["workspaces"].get(ident, {})
+        return {"id": ident, "port": ws.get("port", 7874), "running": True}
 
     def fake_stop(ident, **k):
         state["stopped"].append(ident)
+        state["running"].discard(ident)
         return {"name": ident, "stopped": True}
 
     def fake_remove(ident, *, purge=False):
+        state["removed"].append(ident)
+        state["workspaces"].pop(ident, None)
+        state["running"].discard(ident)
         return {"name": ident, "removed": ["workspace", "data"] if purge else ["workspace"]}
+
+    def fake_remove_remote(ident):
+        if ident not in state["remotes"]:
+            raise Exception(f"no remote member {ident!r}")  # faithful: real supervisor raises FleetError
+        state["remotes"].pop(ident, None)
+        return {"name": ident, "removed": ["remote"]}
+
+    def fake_status():
+        out = [{"name": "host", "host": True}]
+        for wid, ws in state["workspaces"].items():
+            if wid in state["running"]:
+                out.append({"name": ws["name"], "id": wid, "port": ws["port"], "running": True})
+        for r in state["remotes"].values():
+            out.append({"name": r["name"], "id": r["id"], "remote": True, "url": r["url"], "running": True})
+        return out
 
     monkeypatch.setattr(manager, "create", fake_create)
     monkeypatch.setattr(manager, "remove", fake_remove)
     monkeypatch.setattr(supervisor, "start", fake_start)
     monkeypatch.setattr(supervisor, "stop", fake_stop)
-    monkeypatch.setattr(supervisor, "add_remote", fake_add_remote)
     monkeypatch.setattr(supervisor, "remove_remote", fake_remove_remote)
+    monkeypatch.setattr(supervisor, "status", fake_status)
     monkeypatch.setattr(supervisor, "list_remotes", lambda: list(state["remotes"].values()))
     monkeypatch.setattr(portfolio, "_await_ready", _ready_true)
     monkeypatch.setattr(portfolio, "_beads_init", lambda repo: None)
@@ -120,8 +135,15 @@ async def test_spinup_clones_binds_starts_registers(fleet, template, tmp_path):
     assert out["team"] == "alpha"
     assert out["a2a"] == "http://127.0.0.1:7874/a2a"
     assert out["ready"] is True
-    # registered as a fleet remote + recorded in the spawned-teams registry
-    assert "alpha" in fleet["remotes"]
+    # joined the fleet as a LOCAL member (no add_remote) — resolvable + dispatchable by name
+    assert "alpha" not in fleet["remotes"]
+    assert portfolio._remote_by_name("alpha") == {
+        "name": "alpha",
+        "id": "alpha-abcd",
+        "url": "http://127.0.0.1:7874",
+        "token": "",
+    }
+    # recorded in the spawned-teams registry
     assert portfolio._team_by_name("alpha")["repo"] == out["repo"]
     # the repo was BOUND into the cloned config — every sentinel filled
     bound = (tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text()
@@ -182,7 +204,7 @@ async def test_spinup_uses_config_team_template(fleet, template, tmp_path):
     repo.mkdir()
     tool = _tool("portfolio_spinup_team", {"team_template": str(template)})
     out = json.loads(await tool.ainvoke({"name": "beta", "repo": str(repo)}))
-    assert out["team"] == "beta" and "beta" in fleet["remotes"]
+    assert out["team"] == "beta" and portfolio._remote_by_name("beta") is not None
 
 
 @pytest.mark.asyncio
@@ -238,10 +260,13 @@ async def test_teardown_disposes_a_spawned_team(fleet, template, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     await _tool("portfolio_spinup_team").ainvoke({"name": "alpha", "repo": str(repo), "template": str(template)})
+    assert portfolio._remote_by_name("alpha") is not None  # live local member before teardown
     out = json.loads(await _tool("portfolio_teardown_team").ainvoke({"name": "alpha"}))
-    assert out["stopped"] and out["purged"] and out["unregistered"]
+    # a local team was never a remote, so disposal = stopped + purged (no remote to unregister)
+    assert out["stopped"] and out["purged"]
+    assert "unregistered" not in out
     assert "alpha-abcd" in fleet["stopped"]
-    assert "alpha" not in fleet["remotes"]
+    assert portfolio._remote_by_name("alpha") is None  # gone from the fleet
     assert portfolio._team_by_name("alpha") is None
 
 
@@ -249,6 +274,34 @@ async def test_teardown_disposes_a_spawned_team(fleet, template, tmp_path):
 async def test_teardown_rejects_a_non_spawned_remote(fleet):
     out = await _tool("portfolio_teardown_team").ainvoke({"name": "nope"})
     assert "not a portfolio-spawned team" in out
+
+
+def test_remote_by_name_prefers_remote_then_local(fleet, monkeypatch):
+    """A remote (with a token) wins a name clash; otherwise a local fleet member resolves
+    on 127.0.0.1:<port> with no token — how a spawned team is addressed without add_remote."""
+    from graph.fleet import supervisor
+
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda: [
+            {"name": "host", "host": True},
+            {"name": "local-team", "id": "local-team-1", "port": 7880, "running": True},
+            {"name": "ext", "id": "ext-1", "remote": True, "url": "https://ext.example", "running": True},
+        ],
+    )
+    monkeypatch.setattr(
+        supervisor, "list_remotes", lambda: [{"id": "ext-1", "name": "ext", "url": "https://ext.example", "token": "t"}]
+    )
+    assert portfolio._remote_by_name("ext")["token"] == "t"  # remote wins (carries auth)
+    assert portfolio._remote_by_name("local-team") == {
+        "name": "local-team",
+        "id": "local-team-1",
+        "url": "http://127.0.0.1:7880",
+        "token": "",
+    }
+    assert portfolio._remote_by_name("host") is None  # never the PM itself
+    assert portfolio._remote_by_name("absent") is None
 
 
 # ── portfolio_autodispose ───────────────────────────────────────────────────────
