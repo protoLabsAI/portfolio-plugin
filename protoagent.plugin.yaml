@@ -1,6 +1,6 @@
 id: portfolio
 name: Portfolio (multi-team orchestration)
-version: 0.7.1
+version: 0.7.2
 description: >-
   The PM / program orchestration layer (ADR 0055 P1). One agent orchestrates work
   across MANY team-agents, each running its own project board for its own repo
@@ -38,7 +38,9 @@ config:
   # Base team config for portfolio_spinup_team — a path to a langgraph-config.yaml (or its
   # config dir; a sibling secrets.yaml is cloned too). It carries the team's plugins
   # (project_board + delegates) and coder ladder; the {{REPO}} / {{TEAM_NAME}} / {{GATE}}
-  # sentinels in it are filled per spawn. Leave empty to require an explicit template= arg.
+  # sentinels in it are filled per spawn. Empty falls back to the plugin's shipped example
+  # template (examples/team-template) — point this at a creds-filled copy (gateway key +
+  # model.api_base) for teams that run real model turns.
   team_template: ""
   # Where a spawned team finds its EXTERNAL plugins (project_board, github). Empty = default
   # to the PM host's own plugins dir, so a spawned team reuses what the host already has

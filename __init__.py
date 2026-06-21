@@ -424,6 +424,15 @@ def _host_plugins_dir() -> str:
     return str(live_plugins_dir())
 
 
+def _default_template() -> str:
+    """The plugin's own shipped example team template — the fallback when neither a
+    ``template=`` arg nor ``portfolio.team_template`` is set, so portfolio_spinup_team works
+    out of the box. It's a generic project_board + delegates team; point team_template at a
+    creds-filled copy (gateway key + model.api_base) for teams that run real model turns."""
+    p = Path(__file__).parent / "examples" / "team-template"
+    return str(p) if (p / "langgraph-config.yaml").exists() else ""
+
+
 def _ensure_plugins_dir(cfg_path: Path, plugins_dir: str) -> None:
     """Point the cloned config's ``plugins.dir`` at a directory holding the external
     plugins the team enables (project_board / github), so they actually load — a workspace
@@ -859,8 +868,8 @@ def _tools(cfg: dict | None = None) -> list:
             repo: Absolute path to the repo the team's board manages. Omit only for a
                 prebuilt template that already bakes its repo in.
             template: Path to the base team langgraph-config.yaml (or its config dir; a
-                sibling secrets.yaml is cloned too). Defaults to the ``portfolio.team_template``
-                config value — set that and you can omit it here.
+                sibling secrets.yaml is cloned too). Defaults to ``portfolio.team_template``
+                config, then to the plugin's shipped example template — so you can omit it.
             gate: Pre-PR gate command for the team (fills ``{{GATE}}``). Optional.
             port: Bind port (0 = auto-assign the next free fleet port).
             auto_dispose: If true (default), portfolio_autodispose will tear this team
@@ -880,7 +889,7 @@ def _tools(cfg: dict | None = None) -> list:
             return "Error: a team name is required."
         if _remote_by_name(name) is not None or _team_by_name(name) is not None:
             return f"Error: a team/board named {name!r} already exists. Pick another name or tear it down first."
-        tmpl = (template or "").strip() or str(cfg.get("team_template", "") or "")
+        tmpl = (template or "").strip() or str(cfg.get("team_template", "") or "") or _default_template()
         if not tmpl:
             return (
                 "Error: no team template. Pass template=<path to a base team langgraph-config.yaml> or set "
