@@ -1,6 +1,6 @@
 id: portfolio
 name: Portfolio (multi-team orchestration)
-version: 0.6.0
+version: 0.7.0
 description: >-
   The PM / program orchestration layer (ADR 0055 P1). One agent orchestrates work
   across MANY team-agents, each running its own project board for its own repo
@@ -40,6 +40,10 @@ config:
   # (project_board + delegates) and coder ladder; the {{REPO}} / {{TEAM_NAME}} / {{GATE}}
   # sentinels in it are filled per spawn. Leave empty to require an explicit template= arg.
   team_template: ""
+  # Where a spawned team finds its EXTERNAL plugins (project_board, github). Empty = default
+  # to the PM host's own plugins dir, so a spawned team reuses what the host already has
+  # installed (delegates is builtin + plugin-devkit is in-tree, so those load regardless).
+  team_plugins_dir: ""
 
 # Declarative only (console transparency).
 capabilities:

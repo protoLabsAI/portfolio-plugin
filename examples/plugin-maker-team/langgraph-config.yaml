@@ -1,0 +1,54 @@
+# Example PLUGIN-MAKER team template for portfolio_spinup_team.
+#
+# A specialized engineering team that spins up to build NET-NEW protoAgent plugins.
+# It is an ordinary ephemeral team (project_board + delegates) plus two things that make
+# it a plugin shop:
+#
+#   - plugin-devkit  (IN-TREE — loads in any workspace for free): `scaffold_plugin` /
+#                    `scaffold_bundle` / `enable_plugin` / `reload_plugins`, the
+#                    `building-plugins` authoring skill, and the `plugin-architect` subagent.
+#   - github         (EXTERNAL): open issues / PRs on the new plugin's repo.
+#
+# Spin one up pointed at a (possibly brand-new) plugin repo:
+#   portfolio_spinup_team(name="plugin-shop", repo="/Users/me/dev/my-new-plugin",
+#                         template=".../examples/plugin-maker-team", gate="ruff check . && pytest -q")
+# then dispatch the plugin's features to it; the board's loop scaffolds, tests, and ships them.
+#
+# {{REPO}} / {{TEAM_NAME}} / {{GATE}} are filled per spawn; plugins.dir is auto-set to the
+# PM host's plugins dir (where project_board + github are installed) unless you set it.
+
+identity:
+  name: "{{TEAM_NAME}}"
+
+model:
+  provider: openai
+  name: protolabs/reasoning
+  api_base: ""        # your gateway / OpenAI-compat base URL (or carry it in secrets.yaml)
+  api_key: ""         # falls back to OPENAI_API_KEY in this template's secrets.yaml
+  temperature: 0.2
+
+agent_runtime: native  # or acp:claude for an Opus brain (claude CLI + ANTHROPIC_MODEL=opus)
+
+plugins:
+  enabled: [delegates, plugin-devkit, project_board, github]
+
+delegates:
+  - { name: proto, type: acp, command: proto, args: ["--acp"], workdir: "{{REPO}}", permissions: auto }
+
+# Read+write GitHub for the new plugin's repo (per-agent write gate, github-plugin).
+github:
+  write: true
+
+project_board:
+  repo: "{{REPO}}"
+  coders:
+    fast: proto
+    smart: proto
+  loop_enabled: true
+  local_gate_cmd: "{{GATE}}"   # a plugin's gate is typically: ruff check . && pytest -q
+
+filesystem:
+  enabled: true
+  allow_run: false
+  projects:
+    - { name: "{{TEAM_NAME}}", path: "{{REPO}}", write: true }

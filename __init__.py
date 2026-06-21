@@ -405,6 +405,36 @@ def _beads_init(repo: str) -> None:
         pass
 
 
+def _host_plugins_dir() -> str:
+    """The PM host's live plugins dir (where its git-installed plugins live). The default
+    ``plugins.dir`` for a spawned team, so it discovers the SAME external plugins the host
+    already has — project_board, github — without a per-workspace reinstall. (delegates is
+    builtin and plugin-devkit is in-tree under REPO_ROOT/plugins, so both load free in any
+    workspace; only external plugins need a discovery root.)"""
+    from graph.plugins.installer import live_plugins_dir
+
+    return str(live_plugins_dir())
+
+
+def _ensure_plugins_dir(cfg_path: Path, plugins_dir: str) -> None:
+    """Point the cloned config's ``plugins.dir`` at a directory holding the external
+    plugins the team enables (project_board / github), so they actually load — a workspace
+    created from a config (not a bundle) has no plugins/ of its own. Respect a ``dir`` the
+    template already declares; otherwise set it. Comment-preserving (ruamel)."""
+    if not plugins_dir:
+        return
+    from graph.config_io import load_yaml_doc, save_yaml_doc
+
+    doc = load_yaml_doc(cfg_path)
+    if not isinstance(doc, dict):
+        return
+    plugins = doc.setdefault("plugins", {})
+    if not isinstance(plugins, dict) or plugins.get("dir"):
+        return  # operator's template already chose a plugins dir — don't override
+    plugins["dir"] = plugins_dir
+    save_yaml_doc(doc, cfg_path)
+
+
 async def _await_ready(base: str, timeout: float = 40.0) -> bool:
     """Poll a freshly-started team's ``/healthz`` until it's up (or timeout). A spawned
     server boots its plugins asynchronously, so the returned A2A endpoint isn't dispatch-
@@ -804,6 +834,7 @@ def _tools(cfg: dict | None = None) -> list:
         gate: str = "",
         port: int = 0,
         auto_dispose: bool = True,
+        plugins_dir: str = "",
     ) -> str:
         """Spin up an EPHEMERAL engineering team for a project — a finite-lifetime team-
         agent you spawn on demand, dispatch work to, and dispose when the board drains.
@@ -811,9 +842,9 @@ def _tools(cfg: dict | None = None) -> list:
         It clones a base TEAM config ``template`` (a langgraph-config.yaml that carries the
         team's plugins — project_board + delegates — and its coder ladder) into a scoped
         workspace, binds ``repo`` into it (filling the ``{{REPO}}`` / ``{{TEAM_NAME}}`` /
-        ``{{GATE}}`` sentinels in the template), starts the agent, and registers it as a
-        team board — so the existing portfolio_dispatch / portfolio_board_read / rollup
-        tools address it by ``name``.
+        ``{{GATE}}`` sentinels in the template), points it at the external plugins it needs,
+        starts the agent, and registers it as a team board — so the existing
+        portfolio_dispatch / portfolio_board_read / rollup tools address it by ``name``.
 
         Args:
             name: The team name (also its fleet/A2A name + board prefix). Must be unique.
@@ -826,6 +857,10 @@ def _tools(cfg: dict | None = None) -> list:
             port: Bind port (0 = auto-assign the next free fleet port).
             auto_dispose: If true (default), portfolio_autodispose will tear this team
                 down once its board drains. Set false for a team you'll dispose by hand.
+            plugins_dir: Where the team finds its external plugins (project_board, github).
+                Defaults to the PM host's own plugins dir, so a spawned team reuses what the
+                host already has installed — no per-team reinstall. (delegates is builtin and
+                plugin-devkit is in-tree, so those load regardless.) Override only to isolate.
 
         Returns the team's name, port, A2A endpoint, and the next-step dispatch call.
         """
@@ -851,6 +886,7 @@ def _tools(cfg: dict | None = None) -> list:
             repo_abs = str(Path(repo).expanduser().resolve())
             if not Path(repo_abs).is_dir():
                 return f"Error: repo path not found: {repo}"
+        pdir = (plugins_dir or "").strip() or str(cfg.get("team_plugins_dir", "") or "") or _host_plugins_dir()
 
         # 1. clone the template into a scoped workspace (config + secrets, identity restamped)
         try:
@@ -860,9 +896,11 @@ def _tools(cfg: dict | None = None) -> list:
         wid = ws["id"]
         assigned = ws["port"]
 
-        # 2. bind the repo into the cloned config (+ beads init); roll back the workspace on failure
+        # 2. bind the repo + point at the external plugins (+ beads init); roll back on failure
         try:
-            _apply_team_bindings(Path(ws["path"]) / "langgraph-config.yaml", repo_abs, name, gate)
+            cfg_path = Path(ws["path"]) / "langgraph-config.yaml"
+            _apply_team_bindings(cfg_path, repo_abs, name, gate)
+            _ensure_plugins_dir(cfg_path, pdir)
             if repo_abs:
                 _beads_init(repo_abs)
         except Exception as exc:  # noqa: BLE001

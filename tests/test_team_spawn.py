@@ -100,6 +100,8 @@ def fleet(monkeypatch, tmp_path):
     monkeypatch.setattr(supervisor, "list_remotes", lambda: list(state["remotes"].values()))
     monkeypatch.setattr(portfolio, "_await_ready", _ready_true)
     monkeypatch.setattr(portfolio, "_beads_init", lambda repo: None)
+    monkeypatch.setattr(portfolio, "_host_plugins_dir", lambda: str(tmp_path / "host-plugins"))
+    state["host_plugins"] = str(tmp_path / "host-plugins")
     return state
 
 
@@ -125,6 +127,53 @@ async def test_spinup_clones_binds_starts_registers(fleet, template, tmp_path):
     bound = (tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text()
     assert "{{" not in bound
     assert out["repo"] in bound and "name: alpha" in bound and "ruff check ." in bound
+
+
+@pytest.mark.asyncio
+async def test_spinup_defaults_plugins_dir_to_host(fleet, template, tmp_path):
+    """External plugins (project_board/github) only load with a discovery root — the
+    spawned team defaults plugins.dir to the PM host's own plugins dir."""
+    import yaml
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    await _tool("portfolio_spinup_team").ainvoke({"name": "alpha", "repo": str(repo), "template": str(template)})
+    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text())
+    assert doc["plugins"]["dir"] == fleet["host_plugins"]
+
+
+@pytest.mark.asyncio
+async def test_spinup_honors_explicit_plugins_dir(fleet, template, tmp_path):
+    import yaml
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    await _tool("portfolio_spinup_team").ainvoke(
+        {"name": "alpha", "repo": str(repo), "template": str(template), "plugins_dir": "/custom/plugins"}
+    )
+    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text())
+    assert doc["plugins"]["dir"] == "/custom/plugins"
+
+
+def test_ensure_plugins_dir_sets_when_absent(tmp_path):
+    import yaml
+
+    p = tmp_path / "c.yaml"
+    p.write_text("plugins:\n  enabled: [delegates]\n")
+    portfolio._ensure_plugins_dir(p, "/host/plugins")
+    doc = yaml.safe_load(p.read_text())
+    assert doc["plugins"]["dir"] == "/host/plugins"
+    assert doc["plugins"]["enabled"] == ["delegates"]
+
+
+def test_ensure_plugins_dir_respects_template_choice(tmp_path):
+    import yaml
+
+    p = tmp_path / "c.yaml"
+    p.write_text("plugins:\n  enabled: [delegates]\n  dir: /already/here\n")
+    portfolio._ensure_plugins_dir(p, "/should/not/win")
+    doc = yaml.safe_load(p.read_text())
+    assert doc["plugins"]["dir"] == "/already/here"
 
 
 @pytest.mark.asyncio
