@@ -64,12 +64,23 @@ portfolio:
   team_template: /Users/me/dev/portfolio-plugin/examples/team-template
 ```
 
-A ready-to-copy example (config + `secrets.example.yaml`) lives in
-[`examples/team-template/`](examples/team-template/). **Prebuilt repo-teams** for a
-long-running repo are just a template with the repo baked in (no `{{REPO}}`) — spin one up
-by name with no `repo` argument. **Auto-dispose** only ever touches teams *this PM spawned*
-with `auto_dispose=True`, and never an empty board (a team with no work yet) — so a
-hand-registered standing team and a just-spawned team are both safe.
+**Where the team's plugins come from.** `delegates` (builtin) and `plugin-devkit` (in-tree)
+load in any workspace for free; external plugins (`project_board`, `github`) need a
+discovery root, so the spawned team's `plugins.dir` defaults to the **PM host's own plugins
+dir** — it reuses what the host already has installed, no per-team reinstall. Override with
+`plugins_dir=` / `portfolio.team_plugins_dir`, or bake `plugins.dir` into the template.
+
+**Ready-to-copy templates** live in [`examples/`](examples/) — a generic
+[`team-template/`](examples/team-template/) and a
+[`plugin-maker-team/`](examples/plugin-maker-team/) (a plugin shop: `plugin-devkit` +
+`github` + `project_board`, to build net-new protoAgent plugins). **Prebuilt repo-teams**
+for a long-running repo are just a template with the repo baked in (no `{{REPO}}`) — spin
+one up by name with no `repo` argument, and it boots already pointed at the repo (reading
+its in-repo `PROTO.md` grounding). See [`examples/README.md`](examples/README.md).
+
+**Auto-dispose** only ever touches teams *this PM spawned* with `auto_dispose=True`, and
+never an empty board (a team with no work yet) — so a hand-registered standing team and a
+just-spawned team are both safe.
 
 ## Install
 

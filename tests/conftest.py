@@ -70,6 +70,37 @@ if "graph.workspaces.manager" not in sys.modules:
     sys.modules["graph.workspaces"].manager = mgr
 
 
+# ── graph.config_io — comment-preserving YAML doc load/save (real = ruamel) ──────
+if "graph.config_io" not in sys.modules:
+    _pkg("graph")
+
+    import yaml as _yaml
+
+    def _load_yaml_doc(path):
+        return _yaml.safe_load(Path(path).read_text()) or {}
+
+    def _save_yaml_doc(doc, path):  # real signature is save_yaml_doc(doc, path) — doc first
+        Path(path).write_text(_yaml.safe_dump(doc, sort_keys=False))
+
+    cio = types.ModuleType("graph.config_io")
+    cio.load_yaml_doc = _load_yaml_doc
+    cio.save_yaml_doc = _save_yaml_doc
+    sys.modules["graph.config_io"] = cio
+    sys.modules["graph"].config_io = cio
+
+
+# ── graph.plugins.installer — where git-installed plugins live ───────────────────
+if "graph.plugins.installer" not in sys.modules:
+    _pkg("graph")
+    _pkg("graph.plugins")
+
+    inst = types.ModuleType("graph.plugins.installer")
+    inst.live_plugins_dir = lambda: Path("/tmp/host-plugins")  # tests patch _host_plugins_dir
+    sys.modules["graph.plugins.installer"] = inst
+    sys.modules["graph"].plugins = sys.modules["graph.plugins"]
+    sys.modules["graph.plugins"].installer = inst
+
+
 # ── plugins.delegates.adapters — the A2A dispatch primitive ──────────────────────
 if "plugins.delegates.adapters" not in sys.modules:
     _pkg("plugins")
