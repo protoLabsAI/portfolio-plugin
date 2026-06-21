@@ -413,6 +413,42 @@ def _beads_init(repo: str) -> None:
         pass
 
 
+# The proto coding agent writes a repo-level .proto/ dir mixing PER-SESSION SCRATCH
+# (memory/, session-notes.md, repo-map-cache.json) with protoCLI-MANAGED state
+# (.proto/evolve/ holds skills). A blanket `.proto/` ignore would hide the skills, so we
+# ignore ONLY the session artifacts — otherwise the coder leaks them into its PR (bug #49).
+_PROTO_GITIGNORE_MARKER = "# proto coding-agent per-session scratch"
+_PROTO_GITIGNORE_BLOCK = (
+    f"\n{_PROTO_GITIGNORE_MARKER} (NOT the whole .proto — .proto/evolve holds protoCLI-managed\n"
+    "# skills that should be versioned; only the session artifacts are ignored)\n"
+    ".proto/memory/\n"
+    ".proto/session-notes.md\n"
+    ".proto/repo-map-cache.json\n"
+)
+
+
+def _ensure_proto_gitignore(repo: str) -> None:
+    """Make the team's repo ignore the proto coding agent's per-session scratch so its PRs
+    don't leak it (bug #49) — WITHOUT ignoring the whole ``.proto/`` dir, which also holds
+    protoCLI-managed skills (``.proto/evolve``) that should be versioned. Idempotent (a
+    marker guards re-adds). NARROWS any pre-existing blanket ``.proto/`` ignore, since that
+    would hide the skills. Best-effort + non-fatal."""
+    try:
+        gi = Path(repo) / ".gitignore"
+        text = gi.read_text() if gi.exists() else ""
+        if _PROTO_GITIGNORE_MARKER in text:
+            return
+        # Drop any blanket `.proto` / `.proto/` line — it would shadow the selective ignore
+        # (and hide .proto/evolve skills). Leave inline-commented or more-specific lines.
+        kept = [ln for ln in text.splitlines() if ln.strip().rstrip("/") != ".proto"]
+        text = "\n".join(kept)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        gi.write_text(text + _PROTO_GITIGNORE_BLOCK)
+    except OSError:
+        pass
+
+
 def _host_plugins_dir() -> str:
     """The PM host's live plugins dir (where its git-installed plugins live). The default
     ``plugins.dir`` for a spawned team, so it discovers the SAME external plugins the host
@@ -913,13 +949,15 @@ def _tools(cfg: dict | None = None) -> list:
         wid = ws["id"]
         assigned = ws["port"]
 
-        # 2. bind the repo + point at the external plugins (+ beads init); roll back on failure
+        # 2. bind the repo + point at the external plugins (+ beads init + ignore the
+        # coder's per-session .proto scratch so its PRs ship clean); roll back on failure
         try:
             cfg_path = Path(ws["path"]) / "langgraph-config.yaml"
             _apply_team_bindings(cfg_path, repo_abs, name, gate)
             _ensure_plugins_dir(cfg_path, pdir)
             if repo_abs:
                 _beads_init(repo_abs)
+                _ensure_proto_gitignore(repo_abs)
         except Exception as exc:  # noqa: BLE001
             await asyncio.to_thread(manager.remove, wid, purge=True)
             return f"Error binding repo into team config: {exc}"

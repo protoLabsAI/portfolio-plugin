@@ -145,6 +145,8 @@ async def test_spinup_clones_binds_starts_registers(fleet, template, tmp_path):
     }
     # recorded in the spawned-teams registry
     assert portfolio._team_by_name("alpha")["repo"] == out["repo"]
+    # repo-prep ignored the coder's per-session .proto scratch (so its PRs ship clean)
+    assert ".proto/memory/" in (repo / ".gitignore").read_text()
     # the repo was BOUND into the cloned config — every sentinel filled
     bound = (tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text()
     assert "{{" not in bound
@@ -404,3 +406,43 @@ def test_apply_team_bindings_keeps_baked_repo_when_none_given(tmp_path):
     t = p.read_text()
     assert "{{REPO}}" in t  # a prebuilt template's baked repo is left untouched
     assert "name: beta" in t
+
+
+# ── _ensure_proto_gitignore (#49) — ignore proto SESSION scratch, keep .proto/evolve skills ──
+
+
+def test_proto_gitignore_ignores_only_session_scratch(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    portfolio._ensure_proto_gitignore(str(repo))
+    gi = (repo / ".gitignore").read_text()
+    # the actual ignore patterns (non-comment lines)
+    patterns = {ln.strip() for ln in gi.splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
+    # the per-session scratch is ignored
+    assert ".proto/memory/" in patterns
+    assert ".proto/session-notes.md" in patterns
+    assert ".proto/repo-map-cache.json" in patterns
+    # but NEVER the whole dir — protoCLI skills under .proto/evolve must stay versioned
+    assert ".proto/" not in patterns and ".proto" not in patterns
+    assert not any(p.startswith(".proto/evolve") for p in patterns)
+
+
+def test_proto_gitignore_narrows_a_blanket_ignore(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    (repo / ".gitignore").write_text("node_modules/\n.proto/\n*.db\n")
+    portfolio._ensure_proto_gitignore(str(repo))
+    gi = (repo / ".gitignore").read_text()
+    lines = {ln.strip() for ln in gi.splitlines()}
+    assert ".proto/" not in lines  # the blanket ignore (which hid skills) was narrowed away
+    assert "node_modules/" in gi and "*.db" in gi  # unrelated lines preserved
+    assert ".proto/memory/" in gi  # selective scratch added
+
+
+def test_proto_gitignore_is_idempotent(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    portfolio._ensure_proto_gitignore(str(repo))
+    once = (repo / ".gitignore").read_text()
+    portfolio._ensure_proto_gitignore(str(repo))
+    assert (repo / ".gitignore").read_text() == once  # the marker guards a re-add
