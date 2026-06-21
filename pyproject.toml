@@ -1,6 +1,6 @@
 [project]
 name = "portfolio"
-version = "0.5.0"
+version = "0.6.0"
 description = "Multi-team orchestration plugin for protoAgent — one PM agent dispatches to, rolls up, watches, and sequences MANY team-agents' project boards over A2A (ADR 0055)."
 requires-python = ">=3.11"
 

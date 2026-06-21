@@ -48,10 +48,26 @@ if "graph.fleet.supervisor" not in sys.modules:
     sup.list_remotes = lambda: []  # tests patch
     sup.status = lambda: []  # tests patch
     sup.add_remote = lambda *a, **k: {}  # tests patch
+    sup.remove_remote = lambda *a, **k: {}  # tests patch — team teardown
+    sup.start = lambda *a, **k: {}  # tests patch — spawn a team agent
+    sup.stop = lambda *a, **k: {}  # tests patch — stop a team agent
     sup.refresh_remote_probes = _refresh_remote_probes
     sys.modules["graph.fleet.supervisor"] = sup
     sys.modules["graph"].fleet = sys.modules["graph.fleet"]
     sys.modules["graph.fleet"].supervisor = sup
+
+
+# ── graph.workspaces.manager — the workspace (scoped agent) lifecycle ────────────
+if "graph.workspaces.manager" not in sys.modules:
+    _pkg("graph")
+    _pkg("graph.workspaces")
+
+    mgr = types.ModuleType("graph.workspaces.manager")
+    mgr.create = lambda *a, **k: {}  # tests patch — clone a team config into a workspace
+    mgr.remove = lambda *a, **k: {}  # tests patch — purge a team workspace
+    sys.modules["graph.workspaces.manager"] = mgr
+    sys.modules["graph"].workspaces = sys.modules["graph.workspaces"]
+    sys.modules["graph.workspaces"].manager = mgr
 
 
 # ── plugins.delegates.adapters — the A2A dispatch primitive ──────────────────────
