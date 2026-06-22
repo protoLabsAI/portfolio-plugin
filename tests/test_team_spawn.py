@@ -438,6 +438,62 @@ async def test_autodispose_ignores_manual_teams(fleet):
     assert "No auto-dispose teams" in out
 
 
+@pytest.mark.asyncio
+async def test_autodispose_prunes_a_dead_team(fleet, monkeypatch):
+    """A spawned team whose process is GONE (e.g. a host restart killed it) but whose
+    workspace lingers as an unreachable zombie board is disposed — not left up forever."""
+    from graph.fleet import supervisor
+
+    fleet["remotes"]["dead"] = {"id": "dead", "name": "dead", "url": "http://127.0.0.1:9999", "token": ""}
+    portfolio._record_team(
+        {"name": "dead", "id": "dead-id", "port": 9999, "repo": "/r", "auto_dispose": True, "spawned_at": "t"}
+    )
+
+    async def unreachable(rec, state=""):
+        raise portfolio._BoardUnavailable("connection refused")
+
+    monkeypatch.setattr(portfolio, "_fetch_board_features", unreachable)
+    monkeypatch.setattr(supervisor, "is_running", lambda ident: False)  # the process is dead
+    out = json.loads(await _tool("portfolio_autodispose").ainvoke({}))
+    assert [d["team"] for d in out["disposed"]] == ["dead"]
+    assert out["disposed"][0]["reason"] == "dead (process gone)"
+    assert portfolio._team_by_name("dead") is None  # the zombie entry is gone
+
+
+@pytest.mark.asyncio
+async def test_autodispose_keeps_a_live_but_unreachable_team(fleet, monkeypatch):
+    """A still-running team with a transient board hiccup is LEFT UP (not mistaken for dead)."""
+    from graph.fleet import supervisor
+
+    fleet["remotes"]["blip"] = {"id": "blip", "name": "blip", "url": "http://x", "token": ""}
+    portfolio._record_team(
+        {"name": "blip", "id": "blip-id", "port": 1, "repo": "/r", "auto_dispose": True, "spawned_at": "t"}
+    )
+
+    async def unreachable(rec, state=""):
+        raise portfolio._BoardUnavailable("temporary 503")
+
+    monkeypatch.setattr(portfolio, "_fetch_board_features", unreachable)
+    monkeypatch.setattr(supervisor, "is_running", lambda ident: True)  # still alive
+    out = json.loads(await _tool("portfolio_autodispose").ainvoke({}))
+    assert out["disposed"] == []
+    assert portfolio._team_by_name("blip") is not None  # left up
+
+
+def test_record_team_is_locked_during_rmw(fleet, tmp_path, monkeypatch):
+    """_record_team takes the registry file lock so concurrent spinups don't drop entries."""
+    held = {}
+    real_lock = portfolio._file_lock
+
+    def tracking_lock(path):
+        held["path"] = str(path)
+        return real_lock(path)
+
+    monkeypatch.setattr(portfolio, "_file_lock", tracking_lock)
+    portfolio._record_team({"name": "x", "id": "x", "auto_dispose": True})
+    assert held["path"].endswith("portfolio_teams.json")  # the lock wraps the teams RMW
+
+
 # ── portfolio_teams + bindings ──────────────────────────────────────────────────
 
 

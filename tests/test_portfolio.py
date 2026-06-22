@@ -436,6 +436,29 @@ def test_link_remove(monkeypatch, tmp_path):
     assert "No cross-board link" in link.invoke({"remove": "lnk-zzzzzzzz"})
 
 
+def test_link_concurrent_writes_dont_drop(monkeypatch, tmp_path):
+    """Two concurrent portfolio_link calls (the LLM firing both in one turn) BOTH persist —
+    the file lock serializes the read-modify-write. Regression for the dropped-link race."""
+    import threading
+
+    _patch_links(monkeypatch, tmp_path)
+    link = _tool("portfolio_link")
+    barrier = threading.Barrier(2)
+
+    def add(feat):
+        barrier.wait()  # release both threads together to maximize the overlap
+        link.invoke({"from_board": "team-web", "from_feature": feat, "to_board": "team-api", "to_feature": "a1"})
+
+    threads = [threading.Thread(target=add, args=(f,)) for f in ("w1", "w2")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    links = json.loads((tmp_path / "links.json").read_text())
+    assert len(links) == 2  # neither append was clobbered
+    assert {ln["from_feature"] for ln in links} == {"w1", "w2"}
+
+
 @pytest.mark.asyncio
 async def test_plan_satisfied_blocking_and_ready(monkeypatch, tmp_path):
     import portfolio as pf

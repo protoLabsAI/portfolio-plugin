@@ -277,6 +277,22 @@ async def _fetch_all(recs: list) -> tuple[dict, dict]:
     return by_board, unreachable
 
 
+def _file_lock(path):
+    """A cross-process lock around a registry file's READ-MODIFY-WRITE (links / teams).
+    Several tool calls can run concurrently in one agent turn (the LLM fires them in
+    parallel), and an unlocked load→append→save loses an entry — that's how two
+    portfolio_link calls in one turn dropped one. ``filelock`` is host-provided; if it's
+    absent (an odd env) degrade to a no-op so single-call paths still work."""
+    try:
+        from filelock import FileLock
+
+        return FileLock(str(path) + ".lock", timeout=10)
+    except Exception:  # noqa: BLE001 — no filelock ⇒ best-effort (uncontended single calls are fine)
+        import contextlib
+
+        return contextlib.nullcontext()
+
+
 def _links_path():
     """Cross-board dependency edges, scoped under the PM's data root (ADR 0004) —
     mirrors the P2 snapshot + fleet remotes.json. Edges are PM state: a team-agent
@@ -485,13 +501,15 @@ def _save_teams(teams: list) -> None:
 
 
 def _record_team(rec: dict) -> None:
-    teams = [t for t in _load_teams() if t.get("name") != rec["name"]]
-    teams.append(rec)
-    _save_teams(teams)
+    with _file_lock(_teams_path()):  # serialize concurrent spinups (RMW on the registry)
+        teams = [t for t in _load_teams() if t.get("name") != rec["name"]]
+        teams.append(rec)
+        _save_teams(teams)
 
 
 def _forget_team(name: str) -> None:
-    _save_teams([t for t in _load_teams() if t.get("name") != name])
+    with _file_lock(_teams_path()):  # serialize against a concurrent spinup/teardown
+        _save_teams([t for t in _load_teams() if t.get("name") != name])
 
 
 def _team_by_name(name: str) -> dict | None:
@@ -872,42 +890,45 @@ def _tools(cfg: dict | None = None) -> list:
 
         Run portfolio_plan to see the graph + what's unblocked. To delete a link, pass
         ``remove="lnk-..."`` (the id from portfolio_plan)."""
-        links = _load_links()
-        if remove:
-            kept = [ln for ln in links if ln.get("id") != remove]
-            if len(kept) == len(links):
-                return f"No cross-board link {remove!r} to remove."
-            _save_links(kept)
-            return f"Removed link {remove}."
-        if not (from_board and from_feature and to_board and to_feature):
-            return "Error: from_board, from_feature, to_board and to_feature are all required."
-        if (from_board, from_feature) == (to_board, to_feature):
-            return "Error: a feature can't depend on itself."
-        for b in (from_board, to_board):
-            if _remote_by_name(b) is None:
-                return f"Error: no team board named {b!r}. Call portfolio_boards to list them."
-        eid = _edge_id(from_board, from_feature, to_board, to_feature)
-        if any(ln.get("id") == eid for ln in links):
-            return f"Already linked ({eid})."
-        edge = {
-            "id": eid,
-            "from_board": from_board,
-            "from_feature": from_feature,
-            "to_board": to_board,
-            "to_feature": to_feature,
-            "note": note,
-        }
-        if title or spec:  # planned dispatch — the held work to create once unblocked
-            edge.update(
-                title=title,
-                spec=spec,
-                acceptance_criteria=acceptance_criteria,
-                files_to_modify=files_to_modify,
-                dispatched=False,
-            )
-        if _has_cycle(links + [edge]):
-            return "Error: that link would create a cross-board dependency cycle — not recorded."
-        _save_links(links + [edge])
+        # Lock the whole read-modify-write so two concurrent portfolio_link calls in one
+        # turn can't clobber each other's append (the dropped-link race).
+        with _file_lock(_links_path()):
+            links = _load_links()
+            if remove:
+                kept = [ln for ln in links if ln.get("id") != remove]
+                if len(kept) == len(links):
+                    return f"No cross-board link {remove!r} to remove."
+                _save_links(kept)
+                return f"Removed link {remove}."
+            if not (from_board and from_feature and to_board and to_feature):
+                return "Error: from_board, from_feature, to_board and to_feature are all required."
+            if (from_board, from_feature) == (to_board, to_feature):
+                return "Error: a feature can't depend on itself."
+            for b in (from_board, to_board):
+                if _remote_by_name(b) is None:
+                    return f"Error: no team board named {b!r}. Call portfolio_boards to list them."
+            eid = _edge_id(from_board, from_feature, to_board, to_feature)
+            if any(ln.get("id") == eid for ln in links):
+                return f"Already linked ({eid})."
+            edge = {
+                "id": eid,
+                "from_board": from_board,
+                "from_feature": from_feature,
+                "to_board": to_board,
+                "to_feature": to_feature,
+                "note": note,
+            }
+            if title or spec:  # planned dispatch — the held work to create once unblocked
+                edge.update(
+                    title=title,
+                    spec=spec,
+                    acceptance_criteria=acceptance_criteria,
+                    files_to_modify=files_to_modify,
+                    dispatched=False,
+                )
+            if _has_cycle(links + [edge]):
+                return "Error: that link would create a cross-board dependency cycle — not recorded."
+            _save_links(links + [edge])
         fields = ["id", "from_board", "from_feature", "to_board", "to_feature"]
         if edge.get("spec"):
             fields += ["title", "dispatched"]
@@ -1192,36 +1213,47 @@ def _tools(cfg: dict | None = None) -> list:
 
     @tool
     async def portfolio_autodispose(dry_run: bool = False) -> str:
-        """Close the one-shot lifecycle: tear down every ephemeral team whose board has
-        DRAINED — work was dispatched and every feature reached done (merged), with nothing
-        left active. Only ``auto_dispose`` teams spawned via portfolio_spinup_team are
-        considered, and a team with no work yet (empty board) is NEVER disposed. Idempotent
-        + schedulable: pair it with a cron (like portfolio_watch) so finite projects clean
-        themselves up. Pass dry_run=True to preview."""
+        """Close the one-shot lifecycle: tear down every ephemeral team that's finished or
+        DEAD — its board DRAINED (work dispatched, every feature done/merged), OR its
+        process is gone (e.g. a host restart killed it, leaving a zombie workspace). Only
+        ``auto_dispose`` teams spawned via portfolio_spinup_team are considered, and a team
+        with no work yet (empty, still-running board) is NEVER disposed. Idempotent +
+        schedulable: pair it with a cron (like portfolio_watch) so finite projects — and the
+        debris of a restart — clean themselves up. Pass dry_run=True to preview."""
+        from graph.fleet import supervisor
+
         teams = [t for t in _load_teams() if t.get("auto_dispose")]
         if not teams:
             return "No auto-dispose teams. Spin one up with portfolio_spinup_team(auto_dispose=True)."
-        drained, kept = [], []
+        to_dispose, kept = [], []  # to_dispose: list of (team, reason)
         for t in teams:
             rec = _remote_by_name(t["name"])
             if rec is None:
-                _forget_team(t["name"])  # remote vanished — prune the stale entry
-                kept.append({"team": t["name"], "status": "remote missing — pruned"})
+                _forget_team(t["name"])  # workspace + remote both gone — prune the stale entry
+                kept.append({"team": t["name"], "status": "missing — pruned"})
                 continue
             try:
                 feats = await _fetch_board_features(rec)
             except _BoardUnavailable as exc:
-                kept.append({"team": t["name"], "status": f"unreadable ({exc}) — left up"})
+                # Unreachable: DEAD (its local process is gone — dispose the zombie
+                # workspace) vs a transient hiccup on a still-running team (leave it up).
+                if not supervisor.is_running(t.get("id", "")):
+                    to_dispose.append((t, "dead (process gone)"))
+                else:
+                    kept.append({"team": t["name"], "status": f"unreadable ({exc}) — left up"})
                 continue
             total = len(feats)
             done = sum(1 for f in feats if f.get("board_state") == "done")
             if total > 0 and done == total:
-                drained.append(t)
+                to_dispose.append((t, "drained"))
             else:
                 kept.append({"team": t["name"], "active": total - done, "done": done})
         if dry_run:
-            return json.dumps({"would_dispose": [t["name"] for t in drained], "kept": kept}, indent=2)
-        disposed = [await asyncio.to_thread(_dispose, t) for t in drained]
+            return json.dumps({"would_dispose": [t["name"] for t, _ in to_dispose], "kept": kept}, indent=2)
+        disposed = []
+        for t, reason in to_dispose:
+            out = await asyncio.to_thread(_dispose, t)
+            disposed.append({**out, "reason": reason})
         return json.dumps({"disposed": disposed, "kept": kept}, indent=2)
 
     return [
