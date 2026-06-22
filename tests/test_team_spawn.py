@@ -678,3 +678,60 @@ def test_portfolio_archetypes_tool_lists_them():
     cfg = {"team_archetypes": {"pc": {"repo": "/dev/pc", "gate": "build"}}}
     out = json.loads(_tool("portfolio_archetypes", cfg).invoke({}))
     assert out == {"pc": {"repo": "/dev/pc", "gate": "build"}}
+
+
+# ── board isolation — a spawned team gets its OWN beads DB, not the repo's .beads ──
+
+
+@pytest.mark.asyncio
+async def test_spinup_isolates_the_board_by_default(fleet, template, tmp_path, monkeypatch):
+    """Default: project_board.db_path → the team's own scoped beads DB (NOT the repo's
+    .beads), and the repo `br init` is skipped — so the team never sees/resumes/pollutes the
+    repo's native board."""
+    import yaml
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    inits: list = []
+    monkeypatch.setattr(portfolio, "_beads_init", lambda r: inits.append(r))
+    out = json.loads(
+        await _tool("portfolio_spinup_team").ainvoke({"name": "alpha", "repo": str(repo), "template": str(template)})
+    )
+    assert out["board"] == "isolated"
+    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text())
+    assert doc["project_board"]["db_path"].endswith("board.beads.db")  # scoped, not the repo's .beads
+    assert inits == []  # repo `br init` skipped (the board isn't the repo's .beads)
+
+
+@pytest.mark.asyncio
+async def test_spinup_shared_board_uses_the_repo_beads(fleet, template, tmp_path, monkeypatch):
+    """Opt-in: shared_board=True → the repo's own .beads (br init runs, no db_path) — for a
+    team that IS the repo's dev team."""
+    import yaml
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    inits: list = []
+    monkeypatch.setattr(portfolio, "_beads_init", lambda r: inits.append(r))
+    out = json.loads(
+        await _tool("portfolio_spinup_team").ainvoke(
+            {"name": "alpha", "repo": str(repo), "template": str(template), "shared_board": True}
+        )
+    )
+    assert out["board"] == "shared (repo .beads)"
+    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text())
+    assert "db_path" not in (doc.get("project_board") or {})  # uses the repo's .beads
+    assert inits == [out["repo"]]  # repo `br init` ran
+
+
+def test_set_board_db_sets_and_respects_template(tmp_path):
+    import yaml
+
+    p = tmp_path / "c.yaml"
+    p.write_text("project_board:\n  repo: /r\n")
+    portfolio._set_board_db(p, "/scoped/board.db")
+    assert yaml.safe_load(p.read_text())["project_board"]["db_path"] == "/scoped/board.db"
+    # a template that pins its own db_path is respected
+    p.write_text("project_board:\n  db_path: /mine.db\n")
+    portfolio._set_board_db(p, "/scoped/board.db")
+    assert yaml.safe_load(p.read_text())["project_board"]["db_path"] == "/mine.db"
