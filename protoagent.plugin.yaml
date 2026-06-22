@@ -1,6 +1,6 @@
 id: portfolio
 name: Portfolio (multi-team orchestration)
-version: 0.8.0
+version: 0.9.0
 description: >-
   The PM / program orchestration layer (ADR 0055 P1). One agent orchestrates work
   across MANY team-agents, each running its own project board for its own repo
@@ -46,6 +46,11 @@ config:
   # to the PM host's own plugins dir, so a spawned team reuses what the host already has
   # installed (delegates is builtin + plugin-devkit is in-tree, so those load regardless).
   team_plugins_dir: ""
+
+# Console view (ADR 0026) — a Portfolio dashboard: one card per team/board with lane
+# counts, blocked/critical-path, drain status + A2A endpoint. Served on the public prefix.
+views:
+  - { id: portfolio, label: "Portfolio", icon: Network, path: /plugins/portfolio/dashboard }
 
 # Declarative only (console transparency).
 capabilities:
