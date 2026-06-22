@@ -116,6 +116,13 @@ def fleet(monkeypatch, tmp_path):
     monkeypatch.setattr(portfolio, "_await_ready", _ready_true)
     monkeypatch.setattr(portfolio, "_beads_init", lambda repo: None)
     monkeypatch.setattr(portfolio, "_host_plugins_dir", lambda: str(tmp_path / "host-plugins"))
+
+    async def fake_a2a_send(base, instruction, *, token="", timeout=240):
+        state["onboard_sent"].append({"base": base, "instruction": instruction})
+        return "Readiness: PROTO.md FIXED, gate PASS, board empty."
+
+    monkeypatch.setattr(portfolio, "_a2a_send", fake_a2a_send)
+    state["onboard_sent"] = []
     state["host_plugins"] = str(tmp_path / "host-plugins")
     return state
 
@@ -152,6 +159,71 @@ async def test_spinup_clones_binds_starts_registers(fleet, template, tmp_path):
     bound = (tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text()
     assert "{{" not in bound
     assert out["repo"] in bound and "name: alpha" in bound and "ruff check ." in bound
+    # the team was sent a one-time onboarding instruction (over A2A) + summary surfaced
+    assert len(fleet["onboard_sent"]) == 1
+    assert "onboard-project" in fleet["onboard_sent"][0]["instruction"]
+    assert out["onboarding"].startswith("Readiness:")
+
+
+@pytest.mark.asyncio
+async def test_spinup_auto_detects_the_gate(fleet, template, tmp_path):
+    """No gate passed → spinup infers the repo's real check command and binds it."""
+    repo = tmp_path / "pyrepo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\n")
+    out = json.loads(
+        await _tool("portfolio_spinup_team").ainvoke({"name": "alpha", "repo": str(repo), "template": str(template)})
+    )
+    assert out["gate"] == "ruff check . && ruff format --check ."
+    bound = (tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text()
+    assert "ruff check . && ruff format --check ." in bound
+
+
+@pytest.mark.asyncio
+async def test_spinup_explicit_gate_beats_autodetect(fleet, template, tmp_path):
+    repo = tmp_path / "pyrepo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\n")
+    out = json.loads(
+        await _tool("portfolio_spinup_team").ainvoke(
+            {"name": "alpha", "repo": str(repo), "template": str(template), "gate": "make check"}
+        )
+    )
+    assert out["gate"] == "make check"
+
+
+@pytest.mark.asyncio
+async def test_spinup_onboard_false_skips_the_kick(fleet, template, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = json.loads(
+        await _tool("portfolio_spinup_team").ainvoke(
+            {"name": "alpha", "repo": str(repo), "template": str(template), "onboard": False}
+        )
+    )
+    assert out["onboarding"] == "skipped"
+    assert fleet["onboard_sent"] == []  # no A2A onboarding message sent
+
+
+def test_detect_gate_by_stack(tmp_path):
+    py = tmp_path / "py"
+    py.mkdir()
+    (py / "pyproject.toml").write_text("")
+    assert portfolio._detect_gate(str(py)).startswith("ruff check")
+
+    vp = tmp_path / "vp"
+    vp.mkdir()
+    (vp / "package.json").write_text('{"devDependencies":{"vitepress":"1.0"}}')
+    assert portfolio._detect_gate(str(vp)) == "npm ci && npm run docs:build"
+
+    node = tmp_path / "node"
+    node.mkdir()
+    (node / "package.json").write_text('{"name":"x"}')
+    assert portfolio._detect_gate(str(node)) == "npm ci && npm test"
+
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert portfolio._detect_gate(str(bare)) == ""  # unrecognized → empty (onboarding may set one)
 
 
 @pytest.mark.asyncio
