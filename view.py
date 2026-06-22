@@ -85,6 +85,17 @@ VIEW_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .st.blocked{color:var(--pl-color-danger,#f85149);border-color:var(--pl-color-danger,#f85149)}
   .ft{flex:1} .ft .t{font-size:12px} .ft .i{font-size:10px;opacity:.6}
   a{color:var(--pl-color-accent,#6cb6ff)}
+  /* spin-up button + form */
+  .btn{background:var(--pl-color-accent,#6cb6ff);color:var(--pl-color-bg,#0b0d10);border:0;cursor:pointer;
+    border-radius:var(--pl-radius-sm,4px);padding:5px 11px;font-size:12px;font-weight:600;font-family:inherit}
+  .btn:disabled{opacity:.6;cursor:default}
+  .sform{display:flex;flex-direction:column;gap:12px;margin-top:8px}
+  .sform label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--pl-color-fg-muted,#8a8f98)}
+  .sform input[type=text],.sform input:not([type]){background:var(--pl-color-bg-subtle,#15181d);
+    border:1px solid var(--pl-color-border,#272b33);border-radius:var(--pl-radius-sm,4px);
+    color:var(--pl-color-fg,#e6e6e6);padding:7px 9px;font-size:13px;font-family:inherit}
+  .sform label.ck{flex-direction:row;align-items:center;gap:7px;font-size:12px;color:var(--pl-color-fg,#e6e6e6)}
+  .sform .hint{opacity:.6;font-weight:400}
 </style>
 <script>
   // Slug-aware base (so assets + fetches stay same-origin through the fleet proxy).
@@ -94,7 +105,7 @@ VIEW_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 </script>
 </head><body>
 <div class="wrap">
-  <header><h1>Portfolio</h1><div class="sub" id="summary"></div></header>
+  <header><h1>Portfolio</h1><div class="sub" id="summary"></div><span class="grow"></span><button class="btn" id="newbtn">+ Team</button></header>
   <div class="tabs">
     <div class="tab on" data-tab="boards">Boards</div>
     <div class="tab" data-tab="deps">Dependencies</div>
@@ -207,6 +218,42 @@ document.getElementById("boards").addEventListener("click", e=>{
   const c = e.target.closest("[data-board]"); if (c) openBoard(c.getAttribute("data-board"));
 });
 
+// ── spin up a team (the button) ───────────────────────────────────────────────────
+function openSpawn(){
+  const dr = document.getElementById("drawer");
+  dr.innerHTML = `<div class="dhead"><h2>Spin up a team</h2><span class="x" id="x">✕</span></div>
+    <form id="spawnf" class="sform" autocomplete="off">
+      <label>Team name<input name="name" required placeholder="docs-team"></label>
+      <label>Repo path (absolute)<input name="repo" required placeholder="/Users/me/dev/myrepo"></label>
+      <label>Gate <span class="hint">— pre-PR check; blank = auto-detect</span><input name="gate" placeholder="npm test"></label>
+      <label class="ck"><input type="checkbox" name="onboard"> Onboard the repo first <span class="hint">(slower)</span></label>
+      <label class="ck"><input type="checkbox" name="auto_dispose" checked> Auto-dispose when the board drains</label>
+      <button type="submit" class="btn" id="go">Spin up</button>
+      <div id="sresult"></div>
+    </form>`;
+  document.getElementById("scrim").classList.add("on"); dr.classList.add("on");
+  dr.querySelector("#x").onclick = closeDrawer;
+  dr.querySelector("#spawnf").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target, go = f.querySelector("#go"), res = f.querySelector("#sresult");
+    go.disabled = true; go.textContent = "Spinning up…"; res.innerHTML = `<div class="sub">cloning + starting the team…</div>`;
+    try {
+      const r = await kit.apiFetch("/api/plugins/portfolio/spinup", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ name: f.name.value.trim(), repo: f.repo.value.trim(),
+          gate: f.gate.value.trim(), onboard: f.onboard.checked, auto_dispose: f.auto_dispose.checked })
+      });
+      const d = await r.json();
+      if (d && d.error){ res.innerHTML = `<div class="err">${esc(d.error)}</div>`; go.disabled=false; go.textContent="Spin up"; return; }
+      closeDrawer(); tab = "boards";
+      document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on", x.dataset.tab==="boards"));
+      document.getElementById("boards").hidden = false; document.getElementById("deps").hidden = true;
+      load();
+    } catch(err){ res.innerHTML = `<div class="err">${esc(""+err)}</div>`; go.disabled=false; go.textContent="Spin up"; }
+  };
+}
+document.getElementById("newbtn").onclick = openSpawn;
+
 // ── tabs + load loop ──────────────────────────────────────────────────────────────
 let tab = "boards";
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
@@ -258,13 +305,16 @@ def build_view_router():
     return router
 
 
-def build_data_router():
+def build_data_router(cfg: dict | None = None):
     """The GATED data router (mounted at /api/plugins/portfolio). Reflects the same data
-    the portfolio tools compute — overview (rollup), per-board features, and the plan."""
+    the portfolio tools compute — overview (rollup), per-board features, the plan — and
+    accepts a POST to spin up a team (the dashboard's button). ``cfg`` is the plugin's
+    resolved config (for the team_template default), bearer-gated like all /api routes."""
     import asyncio
 
     from fastapi import APIRouter
 
+    cfg = cfg or {}
     router = APIRouter()
 
     @router.get("/overview")
@@ -334,5 +384,21 @@ def build_data_router():
         from . import _compute_plan
 
         return await _compute_plan()
+
+    @router.post("/spinup")
+    async def _spinup(body: dict) -> dict:
+        """Spin up a team — the dashboard's button. Bearer-gated (operator). Shares the
+        same core as the portfolio_spinup_team tool. Onboarding defaults OFF here for a
+        responsive click (the team onboards on its first dispatch, or tick the box)."""
+        from . import _spinup_team
+
+        return await _spinup_team(
+            (body.get("name") or "").strip(),
+            (body.get("repo") or "").strip(),
+            gate=(body.get("gate") or "").strip(),
+            auto_dispose=bool(body.get("auto_dispose", True)),
+            onboard=bool(body.get("onboard", False)),
+            cfg=cfg,
+        )
 
     return router
