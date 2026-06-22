@@ -305,6 +305,82 @@ def _has_cycle(links: list) -> bool:
     return any(color.get(n, 0) == 0 and visit(n) for n in list(adj))
 
 
+async def _compute_plan() -> dict:
+    """The cross-board dependency graph + what's ready to dispatch next. Shared by the
+    portfolio_plan tool AND the dashboard's dependency view (one source of truth). Returns
+    ``{links, ready_to_dispatch, blocked}`` — ``links`` is ``[]`` when none are recorded.
+    Each link carries a ``status``: ``satisfied`` (the depended-on feature is done),
+    ``blocking`` (not yet), ``unknown`` (its board is unreachable — never assumed
+    satisfied), or ``dangling`` (the board/feature no longer exists)."""
+    links = _load_links()
+    if not links:
+        return {"links": [], "ready_to_dispatch": [], "blocked": []}
+    from graph.fleet import supervisor
+
+    by_board, unreachable = await _fetch_all(supervisor.list_remotes())
+    state = {}
+    for name, feats in by_board.items():
+        for f in feats:
+            if f.get("id"):
+                state[(name, f["id"])] = f.get("board_state")
+
+    def status_of(ln) -> str:
+        if ln["to_board"] in unreachable:
+            return "unknown"  # fail-closed: an unreadable blocker is NOT satisfied
+        key = (ln["to_board"], ln["to_feature"])
+        if key not in state:
+            return "dangling"
+        return "satisfied" if state[key] == "done" else "blocking"
+
+    enriched = []
+    for ln in links:
+        e = {
+            "id": ln["id"],
+            "from_board": ln["from_board"],
+            "from_feature": ln["from_feature"],
+            "to_board": ln["to_board"],
+            "to_feature": ln["to_feature"],
+            "status": status_of(ln),
+            "to_state": state.get((ln["to_board"], ln["to_feature"])),
+        }
+        if ln.get("spec"):  # a planned-dispatch link (portfolio_autodispatch creates it when satisfied)
+            e["planned"] = True
+            e["dispatched"] = bool(ln.get("dispatched"))
+        enriched.append(e)
+
+    from collections import defaultdict
+
+    by_from: dict = defaultdict(list)
+    for e in enriched:
+        if e.get("dispatched"):
+            continue  # already auto-dispatched — the held work was created on its board
+        by_from[(e["from_board"], e["from_feature"])].append(e)
+    ready, blocked = [], []
+    for (fb, ff), edges in by_from.items():
+        if all(e["status"] == "satisfied" for e in edges):
+            from_state = state.get((fb, ff))
+            if from_state in (None, "backlog", "ready"):  # not yet underway → dispatchable
+                ready.append({"board": fb, "feature": ff, "state": from_state})
+        else:
+            blocked.append(
+                {
+                    "board": fb,
+                    "feature": ff,
+                    "blockers": [
+                        {
+                            "board": e["to_board"],
+                            "feature": e["to_feature"],
+                            "status": e["status"],
+                            "to_state": e["to_state"],
+                        }
+                        for e in edges
+                        if e["status"] != "satisfied"
+                    ],
+                }
+            )
+    return {"links": enriched, "ready_to_dispatch": ready, "blocked": blocked}
+
+
 def _dispatch_instruction(title: str, spec: str, acceptance_criteria: str, files_to_modify: str) -> str:
     lines = [
         "You manage a project board (the project_board plugin). Create a new feature on it "
@@ -823,75 +899,12 @@ def _tools(cfg: dict | None = None) -> list:
         ``dangling`` (the board/feature no longer exists — prune it). ``ready_to_dispatch``
         = ``from`` features whose every blocker is satisfied and that haven't started yet;
         ``blocked`` lists the rest with their open blockers."""
-        links = _load_links()
-        if not links:
+        plan = await _compute_plan()
+        if not plan["links"]:
             return (
                 "No cross-board links yet. Use portfolio_link to record a dependency, then portfolio_plan to sequence."
             )
-        from graph.fleet import supervisor
-
-        by_board, unreachable = await _fetch_all(supervisor.list_remotes())
-        state = {}
-        for name, feats in by_board.items():
-            for f in feats:
-                if f.get("id"):
-                    state[(name, f["id"])] = f.get("board_state")
-
-        def status_of(ln) -> str:
-            if ln["to_board"] in unreachable:
-                return "unknown"  # fail-closed: an unreadable blocker is NOT satisfied
-            key = (ln["to_board"], ln["to_feature"])
-            if key not in state:
-                return "dangling"
-            return "satisfied" if state[key] == "done" else "blocking"
-
-        enriched = []
-        for ln in links:
-            e = {
-                "id": ln["id"],
-                "from_board": ln["from_board"],
-                "from_feature": ln["from_feature"],
-                "to_board": ln["to_board"],
-                "to_feature": ln["to_feature"],
-                "status": status_of(ln),
-                "to_state": state.get((ln["to_board"], ln["to_feature"])),
-            }
-            if ln.get("spec"):  # a planned-dispatch link (portfolio_autodispatch creates it when satisfied)
-                e["planned"] = True
-                e["dispatched"] = bool(ln.get("dispatched"))
-            enriched.append(e)
-
-        from collections import defaultdict
-
-        by_from: dict = defaultdict(list)
-        for e in enriched:
-            if e.get("dispatched"):
-                continue  # already auto-dispatched — the held work was created on its board
-            by_from[(e["from_board"], e["from_feature"])].append(e)
-        ready, blocked = [], []
-        for (fb, ff), edges in by_from.items():
-            if all(e["status"] == "satisfied" for e in edges):
-                from_state = state.get((fb, ff))
-                if from_state in (None, "backlog", "ready"):  # not yet underway → dispatchable
-                    ready.append({"board": fb, "feature": ff, "state": from_state})
-            else:
-                blocked.append(
-                    {
-                        "board": fb,
-                        "feature": ff,
-                        "blockers": [
-                            {
-                                "board": e["to_board"],
-                                "feature": e["to_feature"],
-                                "status": e["status"],
-                                "to_state": e["to_state"],
-                            }
-                            for e in edges
-                            if e["status"] != "satisfied"
-                        ],
-                    }
-                )
-        return json.dumps({"links": enriched, "ready_to_dispatch": ready, "blocked": blocked}, indent=2)
+        return json.dumps(plan, indent=2)
 
     @tool
     async def portfolio_autodispatch(dry_run: bool = False) -> str:
