@@ -699,7 +699,9 @@ async def test_spinup_isolates_the_board_by_default(fleet, template, tmp_path, m
     )
     assert out["board"] == "isolated"
     doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text())
-    assert doc["project_board"]["db_path"].endswith("board.beads.db")  # scoped, not the repo's .beads
+    # scoped, under a .beads/ dir (beads requires it), NOT the repo's .beads
+    assert doc["project_board"]["db_path"].endswith("/.beads/board.db")
+    assert (tmp_path / "ws" / "alpha" / ".beads").is_dir()  # the dir was created
     assert inits == []  # repo `br init` skipped (the board isn't the repo's .beads)
 
 

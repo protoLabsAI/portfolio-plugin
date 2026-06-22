@@ -882,7 +882,10 @@ async def _spinup_team(
         if not shared_board:
             # Isolated (default): the team's board lives in its own scoped workspace, purged
             # on teardown. projectBoard-plugin honors db_path + skips the repo `br init`.
-            _set_board_db(cfg_path, str(Path(ws["path"]) / "board.beads.db"))
+            # beads requires the db path to sit under a `.beads/` dir — create it.
+            board_db = Path(ws["path"]) / ".beads" / "board.db"
+            board_db.parent.mkdir(parents=True, exist_ok=True)
+            _set_board_db(cfg_path, str(board_db))
         if repo_abs:
             if shared_board:
                 _beads_init(repo_abs)  # opt-in: the team IS this repo's dev team → repo board
