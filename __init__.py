@@ -36,6 +36,18 @@ def register(registry) -> None:
     cfg = getattr(registry, "config", None) or {}
     for t in _tools(cfg):
         registry.register_tool(t)
+    # Console view (ADR 0026) — a Portfolio dashboard. Two routers at DISTINCT prefixes:
+    # the PUBLIC page (iframe src carries no bearer) + the GATED data route. Best-effort:
+    # a view failure must never sink the tools.
+    try:
+        from .view import build_data_router, build_view_router
+
+        registry.register_router(build_view_router(), prefix="/plugins/portfolio")
+        registry.register_router(build_data_router(), prefix="/api/plugins/portfolio")
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).exception("[portfolio] view registration failed")
 
 
 def _remote_by_name(name: str) -> dict | None:

@@ -82,6 +82,15 @@ its in-repo `PROTO.md` grounding). See [`examples/README.md`](examples/README.md
 never an empty board (a team with no work yet) — so a hand-registered standing team and a
 just-spawned team are both safe.
 
+## Console view
+
+The plugin ships a **Portfolio dashboard** (left-rail *Portfolio* panel) — one card per
+team/board with its lane counts (backlog → done), blocked / critical-path items, drain
+status, an `ephemeral` vs `standing` badge, and the A2A endpoint. It reflects the *same*
+rollup the `portfolio_rollup` tool computes (so the panel and the agent see one truth) and
+refreshes every few seconds. Page on the public `/plugins/portfolio/dashboard`; data on the
+gated `/api/plugins/portfolio/overview`.
+
 ## Install
 
 Bundled with the **pm-stack** (Project Manager) bundle alongside `project_board`, or
