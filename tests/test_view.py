@@ -283,3 +283,31 @@ def test_spinup_route_surfaces_errors(monkeypatch):
     app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
     d = TestClient(app).post("/api/plugins/portfolio/spinup", json={"name": "docs", "repo": "/r"}).json()
     assert "already exists" in d["error"]
+
+
+def test_spinup_route_passes_archetype(monkeypatch):
+    captured = {}
+
+    async def fake_spinup(name, repo="", *a, **k):
+        captured["archetype"] = k.get("archetype")
+        return {"team": name}
+
+    monkeypatch.setattr(portfolio, "_spinup_team", fake_spinup)
+    app = FastAPI()
+    app.include_router(view.build_data_router({}), prefix="/api/plugins/portfolio")
+    TestClient(app).post("/api/plugins/portfolio/spinup", json={"name": "pc1", "archetype": "protocontent"})
+    assert captured["archetype"] == "protocontent"
+
+
+def test_archetypes_route_lists_presets():
+    cfg = {"team_archetypes": {"protocontent": {"repo": "/dev/pc", "gate": "build"}}}
+    app = FastAPI()
+    app.include_router(view.build_data_router(cfg), prefix="/api/plugins/portfolio")
+    d = TestClient(app).get("/api/plugins/portfolio/archetypes").json()
+    assert d == {"archetypes": [{"name": "protocontent", "repo": "/dev/pc"}]}
+
+
+def test_view_page_has_archetype_select():
+    html = view.VIEW_PAGE
+    assert "/api/plugins/portfolio/archetypes" in html  # the form fetches the presets
+    assert 'name="archetype"' in html or "archetype" in html

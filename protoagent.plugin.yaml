@@ -1,6 +1,6 @@
 id: portfolio
 name: Portfolio (multi-team orchestration)
-version: 0.11.0
+version: 0.12.0
 description: >-
   The PM / program orchestration layer (ADR 0055 P1). One agent orchestrates work
   across MANY team-agents, each running its own project board for its own repo
@@ -46,6 +46,14 @@ config:
   # to the PM host's own plugins dir, so a spawned team reuses what the host already has
   # installed (delegates is builtin + plugin-devkit is in-tree, so those load regardless).
   team_plugins_dir: ""
+  # Prebuilt team archetypes — named (repo, gate) presets for the repos this PM works often,
+  # so spinning a team up is one word: portfolio_spinup_team(name=..., archetype=<name>) (or
+  # the dashboard dropdown). The repo is freshened (git fetch + ff the default branch) on
+  # spawn. e.g.:
+  #   team_archetypes:
+  #     protocontent: { repo: ~/dev/protoContent, gate: "pnpm -r build" }
+  #     protoagent:   { repo: ~/dev/protoAgent,   gate: "ruff check ." }
+  team_archetypes: {}
 
 # Console view (ADR 0026) — a Portfolio dashboard: one card per team/board with lane
 # counts, blocked/critical-path, drain status + A2A endpoint. Served on the public prefix.

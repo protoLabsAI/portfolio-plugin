@@ -115,6 +115,7 @@ def fleet(monkeypatch, tmp_path):
     monkeypatch.setattr(supervisor, "list_remotes", lambda: list(state["remotes"].values()))
     monkeypatch.setattr(portfolio, "_await_ready", _ready_true)
     monkeypatch.setattr(portfolio, "_beads_init", lambda repo: None)
+    monkeypatch.setattr(portfolio, "_freshen_repo", lambda repo: "stubbed")  # no real git in spinup tests
     monkeypatch.setattr(portfolio, "_host_plugins_dir", lambda: str(tmp_path / "host-plugins"))
 
     async def fake_a2a_send(base, instruction, *, token="", timeout=240):
@@ -586,3 +587,94 @@ def test_proto_exclude_is_idempotent(tmp_path):
     once = (repo / ".git" / "info" / "exclude").read_text()
     portfolio._exclude_proto_scratch(str(repo))
     assert (repo / ".git" / "info" / "exclude").read_text() == once  # marker guards a re-add
+
+
+# ── branch freshness (_freshen_repo) + prebuilt archetypes ───────────────────────
+
+
+def _git(repo, *args):
+    import subprocess
+
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+
+
+def test_freshen_repo_fast_forwards_a_stale_clone(tmp_path):
+    """A clone behind its origin is fast-forwarded to current before the team works on it."""
+    import subprocess
+
+    if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
+        import pytest
+
+        pytest.skip("git not available")
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "t@t")
+    _git(origin, "config", "user.name", "t")
+    (origin / "a.txt").write_text("1")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-qm", "c1")
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", str(origin), str(clone))
+    # advance origin one commit → the clone is now behind
+    (origin / "a.txt").write_text("2")
+    _git(origin, "commit", "-qam", "c2")
+    before = _git(clone, "rev-parse", "HEAD").stdout.strip()
+    status = portfolio._freshen_repo(str(clone))
+    after = _git(clone, "rev-parse", "HEAD").stdout.strip()
+    assert "up to date" in status and "fast-forwarded" in status
+    assert after != before  # the clone moved forward to origin's HEAD
+
+
+def test_freshen_repo_skips_a_repo_with_no_remote(tmp_path):
+    import subprocess
+
+    if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
+        import pytest
+
+        pytest.skip("git not available")
+    r = tmp_path / "r"
+    r.mkdir()
+    _git(r, "init", "-q")
+    assert "no remote" in portfolio._freshen_repo(str(r))
+
+
+def test_freshen_repo_non_git_dir(tmp_path):
+    assert "not a git repo" in portfolio._freshen_repo(str(tmp_path))
+
+
+def test_archetypes_parses_dict_and_string_forms():
+    cfg = {"team_archetypes": {"pc": {"repo": "/dev/pc", "gate": "build"}, "pa": "/dev/pa"}}
+    arch = portfolio._archetypes(cfg)
+    assert arch["pc"] == {"repo": "/dev/pc", "gate": "build"}
+    assert arch["pa"] == {"repo": "/dev/pa"}  # bare string → {repo}
+    assert portfolio._archetypes({}) == {}
+
+
+@pytest.mark.asyncio
+async def test_spinup_archetype_fills_repo_and_gate(fleet, template, tmp_path):
+    """spinup_team(archetype=...) pulls repo + gate from the preset (no repo arg needed)."""
+    repo = tmp_path / "pcrepo"
+    repo.mkdir()
+    cfg = {
+        "team_template": str(template),
+        "team_archetypes": {"protocontent": {"repo": str(repo), "gate": "pnpm -r build"}},
+    }
+    out = json.loads(await _tool("portfolio_spinup_team", cfg).ainvoke({"name": "pc1", "archetype": "protocontent"}))
+    assert out["team"] == "pc1" and out["repo"] == str(repo) and out["gate"] == "pnpm -r build"
+    bound = (tmp_path / "ws" / "pc1" / "langgraph-config.yaml").read_text()
+    assert str(repo) in bound and "pnpm -r build" in bound
+
+
+@pytest.mark.asyncio
+async def test_spinup_unknown_archetype(fleet, template):
+    out = await _tool("portfolio_spinup_team", {"team_archetypes": {"pc": {"repo": "/r"}}}).ainvoke(
+        {"name": "x", "archetype": "nope"}
+    )
+    assert "no team archetype 'nope'" in out and "pc" in out  # lists the known ones
+
+
+def test_portfolio_archetypes_tool_lists_them():
+    cfg = {"team_archetypes": {"pc": {"repo": "/dev/pc", "gate": "build"}}}
+    out = json.loads(_tool("portfolio_archetypes", cfg).invoke({}))
+    assert out == {"pc": {"repo": "/dev/pc", "gate": "build"}}
