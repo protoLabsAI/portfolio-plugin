@@ -51,6 +51,7 @@ if "graph.fleet.supervisor" not in sys.modules:
     sup.remove_remote = lambda *a, **k: {}  # tests patch — team teardown
     sup.start = lambda *a, **k: {}  # tests patch — spawn a team agent
     sup.stop = lambda *a, **k: {}  # tests patch — stop a team agent
+    sup.is_running = lambda *a, **k: True  # tests patch — a team's process liveness
     sup.refresh_remote_probes = _refresh_remote_probes
     sys.modules["graph.fleet.supervisor"] = sup
     sys.modules["graph"].fleet = sys.modules["graph.fleet"]
