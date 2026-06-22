@@ -729,6 +729,58 @@ def _dispose(team: dict) -> dict:
     return out
 
 
+def _freshen_repo(repo: str) -> str:
+    """Bring the repo up to date with its remote BEFORE a team works on it — ``git fetch``
+    + fast-forward the checked-out default branch when it's safe (clean tree, on that
+    branch). So the team's coder branches its per-feature worktrees off CURRENT code, not a
+    stale HEAD (which is how a team ends up reworking already-merged changes / hitting
+    conflicts). Best-effort + non-fatal: no remote / offline / dirty / diverged just skips
+    the fast-forward (the fetch still refreshes ``origin/*`` for worktrees that branch off
+    it). Returns a short status for the spawn result."""
+    import subprocess
+
+    def git(*args, timeout=120):
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=timeout)
+
+    try:
+        if git("rev-parse", "--is-inside-work-tree").returncode != 0:
+            return "not a git repo"
+        if not git("remote").stdout.strip():
+            return "no remote — left as is"
+        f = git("fetch", "--prune", "origin")
+        if f.returncode != 0:
+            return f"fetch failed: {(f.stderr or '').strip()[:120]}"
+        head = git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").stdout.strip()
+        default = head.split("/", 1)[1] if head.startswith("origin/") else "main"
+        cur = git("symbolic-ref", "--quiet", "--short", "HEAD").stdout.strip()
+        if cur != default:
+            return f"fetched; on '{cur}' not '{default}' — left as is"
+        if git("status", "--porcelain").stdout.strip():
+            return f"fetched; '{default}' has local changes — not fast-forwarded"
+        ff = git("merge", "--ff-only", f"origin/{default}")
+        if ff.returncode != 0:
+            return f"fetched; '{default}' diverged from origin — not fast-forwarded"
+        return f"up to date ('{default}' fast-forwarded to origin)"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"freshen skipped: {exc}"
+
+
+def _archetypes(cfg: dict) -> dict:
+    """Named team presets — prebuilt teams for the repos a PM works OFTEN, so
+    ``spinup_team(archetype="protocontent")`` needs no repo/gate/template each time. From
+    ``portfolio.team_archetypes`` — ``{name: {repo, gate?, template?, plugins_dir?}}`` (a
+    bare string value is shorthand for ``{repo: <that>}``)."""
+    raw = (cfg or {}).get("team_archetypes") or {}
+    out: dict = {}
+    if isinstance(raw, dict):
+        for name, spec in raw.items():
+            if isinstance(spec, dict):
+                out[name] = spec
+            elif isinstance(spec, str):
+                out[name] = {"repo": spec}
+    return out
+
+
 async def _spinup_team(
     name: str,
     repo: str = "",
@@ -738,6 +790,7 @@ async def _spinup_team(
     auto_dispose: bool = True,
     plugins_dir: str = "",
     onboard: bool = True,
+    archetype: str = "",
     *,
     cfg: dict | None = None,
 ) -> dict:
@@ -754,6 +807,17 @@ async def _spinup_team(
         return {"error": "Error: a team name is required."}
     if _remote_by_name(name) is not None or _team_by_name(name) is not None:
         return {"error": f"Error: a team/board named {name!r} already exists. Pick another name or tear it down first."}
+    # Archetype = a named (repo, gate, template) preset for a frequently-worked repo; fill
+    # the unset args from it (explicit args still win).
+    if archetype:
+        arch = _archetypes(cfg).get(archetype)
+        if arch is None:
+            known = ", ".join(_archetypes(cfg)) or "(none configured)"
+            return {"error": f"Error: no team archetype {archetype!r}. Known archetypes: {known}."}
+        repo = repo or arch.get("repo", "")
+        gate = gate or arch.get("gate", "")
+        template = template or arch.get("template", "")
+        plugins_dir = plugins_dir or arch.get("plugins_dir", "")
     tmpl = (template or "").strip() or str(cfg.get("team_template", "") or "") or _default_template()
     if not tmpl:
         return {
@@ -784,7 +848,9 @@ async def _spinup_team(
     assigned = ws["port"]
 
     # 2. bind the repo + point at the external plugins (+ beads init + ignore the coder's
-    # per-session .proto scratch so its PRs ship clean); roll back on failure
+    # per-session .proto scratch + FRESHEN the repo so the team works on current code);
+    # roll back on failure
+    freshness = "n/a (no repo)"
     try:
         cfg_path = Path(ws["path"]) / "langgraph-config.yaml"
         _apply_team_bindings(cfg_path, repo_abs, name, gate)
@@ -792,6 +858,7 @@ async def _spinup_team(
         if repo_abs:
             _beads_init(repo_abs)
             _exclude_proto_scratch(repo_abs)
+            freshness = await asyncio.to_thread(_freshen_repo, repo_abs)
     except Exception as exc:  # noqa: BLE001
         await asyncio.to_thread(manager.remove, wid, purge=True)
         return {"error": f"Error binding repo into team config: {exc}"}
@@ -839,6 +906,7 @@ async def _spinup_team(
         "a2a": f"{base}/a2a",
         "repo": repo_abs,
         "gate": gate,
+        "repo_freshness": freshness,
         "auto_dispose": bool(auto_dispose),
         "ready": ready,
         "onboarding": onboarding,
@@ -1137,9 +1205,15 @@ def _tools(cfg: dict | None = None) -> list:
         auto_dispose: bool = True,
         plugins_dir: str = "",
         onboard: bool = True,
+        archetype: str = "",
     ) -> str:
         """Spin up an EPHEMERAL engineering team for a project — a finite-lifetime team-
         agent you spawn on demand, dispatch work to, and dispose when the board drains.
+
+        For a repo you work OFTEN, pass ``archetype=<name>`` (see portfolio_archetypes) — a
+        prebuilt preset that fills repo/gate/template, so spinning up is just
+        ``portfolio_spinup_team(name="content-1", archetype="protocontent")``. The repo is
+        FRESHENED (git fetch + fast-forward the default branch) before the team works on it.
 
         It clones a base TEAM config ``template`` (a langgraph-config.yaml that carries the
         team's plugins — project_board + delegates — and its coder ladder) into a scoped
@@ -1151,8 +1225,10 @@ def _tools(cfg: dict | None = None) -> list:
 
         Args:
             name: The team name (also its fleet/A2A name + board prefix). Must be unique.
+            archetype: A prebuilt team preset (portfolio_archetypes) that supplies repo +
+                gate (+ template) for a frequently-worked repo. Explicit args still win.
             repo: Absolute path to the repo the team's board manages. Omit only for a
-                prebuilt template that already bakes its repo in.
+                prebuilt template that already bakes its repo in, or when using an archetype.
             template: Path to the base team langgraph-config.yaml (or its config dir; a
                 sibling secrets.yaml is cloned too). Defaults to ``portfolio.team_template``
                 config, then to the plugin's shipped example template — so you can omit it.
@@ -1169,12 +1245,31 @@ def _tools(cfg: dict | None = None) -> list:
                 skill once before you dispatch work — scan, auto-fix hygiene, write a grounding
                 doc, board readiness gaps. Best-effort; never fails the spawn. Set false to skip.
 
-        Returns the team's name, port, A2A endpoint, an onboarding summary, and next steps.
+        Returns the team's name, port, A2A endpoint, repo freshness, an onboarding summary,
+        and next steps.
         """
-        result = await _spinup_team(name, repo, template, gate, port, auto_dispose, plugins_dir, onboard, cfg=cfg)
+        result = await _spinup_team(
+            name, repo, template, gate, port, auto_dispose, plugins_dir, onboard, archetype, cfg=cfg
+        )
         if "error" in result:
             return result["error"]
         return json.dumps(result, indent=2)
+
+    @tool
+    def portfolio_archetypes() -> str:
+        """List the prebuilt team archetypes — named (repo, gate) presets for the repos this
+        PM works often, ready to spin up at a moment's notice with
+        ``portfolio_spinup_team(name=..., archetype=<name>)``. Configure them under
+        ``portfolio.team_archetypes`` in config."""
+        arch = _archetypes(cfg)
+        if not arch:
+            return (
+                "No team archetypes configured. Add portfolio.team_archetypes: "
+                "{<name>: {repo: <path>, gate: <cmd>}} to config for one-word spin-ups."
+            )
+        return json.dumps(
+            {n: {"repo": a.get("repo", ""), "gate": a.get("gate", "")} for n, a in arch.items()}, indent=2
+        )
 
     @tool
     async def portfolio_teams() -> str:
@@ -1284,6 +1379,7 @@ def _tools(cfg: dict | None = None) -> list:
         portfolio_plan,
         portfolio_autodispatch,
         portfolio_spinup_team,
+        portfolio_archetypes,
         portfolio_teams,
         portfolio_teardown_team,
         portfolio_autodispose,

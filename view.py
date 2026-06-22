@@ -91,7 +91,7 @@ VIEW_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .btn:disabled{opacity:.6;cursor:default}
   .sform{display:flex;flex-direction:column;gap:12px;margin-top:8px}
   .sform label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--pl-color-fg-muted,#8a8f98)}
-  .sform input[type=text],.sform input:not([type]){background:var(--pl-color-bg-subtle,#15181d);
+  .sform input[type=text],.sform input:not([type]),.sform select{background:var(--pl-color-bg-subtle,#15181d);
     border:1px solid var(--pl-color-border,#272b33);border-radius:var(--pl-radius-sm,4px);
     color:var(--pl-color-fg,#e6e6e6);padding:7px 9px;font-size:13px;font-family:inherit}
   .sform label.ck{flex-direction:row;align-items:center;gap:7px;font-size:12px;color:var(--pl-color-fg,#e6e6e6)}
@@ -219,12 +219,17 @@ document.getElementById("boards").addEventListener("click", e=>{
 });
 
 // ── spin up a team (the button) ───────────────────────────────────────────────────
-function openSpawn(){
+async function openSpawn(){
+  let arches = [];
+  try { arches = (await api("/api/plugins/portfolio/archetypes")).archetypes || []; } catch(e) {}
+  const opts = `<option value="">— custom (enter a repo) —</option>` +
+    arches.map(a => `<option value="${esc(a.name)}">${esc(a.name)} (${esc(a.repo)})</option>`).join("");
   const dr = document.getElementById("drawer");
   dr.innerHTML = `<div class="dhead"><h2>Spin up a team</h2><span class="x" id="x">✕</span></div>
     <form id="spawnf" class="sform" autocomplete="off">
+      ${arches.length ? `<label>Prebuilt repo<select name="archetype" id="arch">${opts}</select></label>` : ""}
       <label>Team name<input name="name" required placeholder="docs-team"></label>
-      <label>Repo path (absolute)<input name="repo" required placeholder="/Users/me/dev/myrepo"></label>
+      <label id="repol">Repo path (absolute)<input name="repo" placeholder="/Users/me/dev/myrepo"></label>
       <label>Gate <span class="hint">— pre-PR check; blank = auto-detect</span><input name="gate" placeholder="npm test"></label>
       <label class="ck"><input type="checkbox" name="onboard"> Onboard the repo first <span class="hint">(slower)</span></label>
       <label class="ck"><input type="checkbox" name="auto_dispose" checked> Auto-dispose when the board drains</label>
@@ -233,14 +238,18 @@ function openSpawn(){
     </form>`;
   document.getElementById("scrim").classList.add("on"); dr.classList.add("on");
   dr.querySelector("#x").onclick = closeDrawer;
+  const archSel = dr.querySelector("#arch"), repoL = dr.querySelector("#repol");
+  if (archSel) archSel.onchange = () => { repoL.style.display = archSel.value ? "none" : "flex"; };  // a prebuilt brings its own repo
   dr.querySelector("#spawnf").onsubmit = async (e) => {
     e.preventDefault();
     const f = e.target, go = f.querySelector("#go"), res = f.querySelector("#sresult");
-    go.disabled = true; go.textContent = "Spinning up…"; res.innerHTML = `<div class="sub">cloning + starting the team…</div>`;
+    const archetype = archSel ? archSel.value : "";
+    if (!archetype && !f.repo.value.trim()){ res.innerHTML = `<div class="err">Pick a prebuilt repo or enter a repo path.</div>`; return; }
+    go.disabled = true; go.textContent = "Spinning up…"; res.innerHTML = `<div class="sub">freshening + starting the team…</div>`;
     try {
       const r = await kit.apiFetch("/api/plugins/portfolio/spinup", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ name: f.name.value.trim(), repo: f.repo.value.trim(),
+        body: JSON.stringify({ name: f.name.value.trim(), repo: f.repo.value.trim(), archetype,
           gate: f.gate.value.trim(), onboard: f.onboard.checked, auto_dispose: f.auto_dispose.checked })
       });
       const d = await r.json();
@@ -385,6 +394,14 @@ def build_data_router(cfg: dict | None = None):
 
         return await _compute_plan()
 
+    @router.get("/archetypes")
+    async def _archetypes_route() -> dict:
+        """The prebuilt team archetypes (name + repo) — the dashboard's spin-up dropdown."""
+        from . import _archetypes
+
+        arch = _archetypes(cfg)
+        return {"archetypes": [{"name": n, "repo": a.get("repo", "")} for n, a in arch.items()]}
+
     @router.post("/spinup")
     async def _spinup(body: dict) -> dict:
         """Spin up a team — the dashboard's button. Bearer-gated (operator). Shares the
@@ -398,6 +415,7 @@ def build_data_router(cfg: dict | None = None):
             gate=(body.get("gate") or "").strip(),
             auto_dispose=bool(body.get("auto_dispose", True)),
             onboard=bool(body.get("onboard", False)),
+            archetype=(body.get("archetype") or "").strip(),
             cfg=cfg,
         )
 
