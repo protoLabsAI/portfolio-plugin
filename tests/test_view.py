@@ -66,6 +66,15 @@ def test_view_page_has_tabs_drilldown_and_graph():
     assert "<svg" in html and "marker-end" in html  # the SVG edges
 
 
+def test_view_page_has_spinup_button():
+    html = view.VIEW_PAGE
+    assert 'id="newbtn"' in html and "openSpawn" in html  # the + Team button
+    # the form POSTs to the spinup route via the kit's authed fetch
+    assert "/api/plugins/portfolio/spinup" in html
+    assert 'method: "POST"' in html
+    assert 'name="repo"' in html and 'name="onboard"' in html  # the form fields
+
+
 def test_view_page_served_public_not_gated():
     app = FastAPI()
     app.include_router(view.build_view_router(), prefix="/plugins/portfolio")
@@ -242,3 +251,35 @@ def test_plan_resolves_LOCAL_spawned_team_boards(monkeypatch):
     plan = TestClient(app).get("/api/plugins/portfolio/plan").json()
     # showteam·f1 exists (ready, not done) → BLOCKING, not dangling
     assert plan["links"][0]["status"] == "blocking"
+
+
+# ── POST /spinup — the dashboard button ──────────────────────────────────────────
+
+
+def test_spinup_route_calls_the_shared_core(monkeypatch):
+    captured = {}
+
+    async def fake_spinup(name, repo="", *a, **k):
+        captured.update(name=name, repo=repo, onboard=k.get("onboard"), auto_dispose=k.get("auto_dispose"))
+        return {"team": name, "port": 7901, "ready": True}
+
+    monkeypatch.setattr(portfolio, "_spinup_team", fake_spinup)
+    app = FastAPI()
+    app.include_router(view.build_data_router({"team_template": "/t"}), prefix="/api/plugins/portfolio")
+    r = TestClient(app).post(
+        "/api/plugins/portfolio/spinup", json={"name": "docs", "repo": "/r", "onboard": True, "auto_dispose": False}
+    )
+    assert r.json()["team"] == "docs"
+    # the button's choices reach the shared core (onboard defaults to the posted value)
+    assert captured == {"name": "docs", "repo": "/r", "onboard": True, "auto_dispose": False}
+
+
+def test_spinup_route_surfaces_errors(monkeypatch):
+    async def fake_spinup(name, repo="", *a, **k):
+        return {"error": "Error: a team named 'docs' already exists."}
+
+    monkeypatch.setattr(portfolio, "_spinup_team", fake_spinup)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    d = TestClient(app).post("/api/plugins/portfolio/spinup", json={"name": "docs", "repo": "/r"}).json()
+    assert "already exists" in d["error"]

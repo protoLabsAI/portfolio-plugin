@@ -43,7 +43,7 @@ def register(registry) -> None:
         from .view import build_data_router, build_view_router
 
         registry.register_router(build_view_router(), prefix="/plugins/portfolio")
-        registry.register_router(build_data_router(), prefix="/api/plugins/portfolio")
+        registry.register_router(build_data_router(cfg), prefix="/api/plugins/portfolio")
     except Exception:  # noqa: BLE001
         import logging
 
@@ -729,6 +729,128 @@ def _dispose(team: dict) -> dict:
     return out
 
 
+async def _spinup_team(
+    name: str,
+    repo: str = "",
+    template: str = "",
+    gate: str = "",
+    port: int = 0,
+    auto_dispose: bool = True,
+    plugins_dir: str = "",
+    onboard: bool = True,
+    *,
+    cfg: dict | None = None,
+) -> dict:
+    """Core of the spin-up flow — shared by the portfolio_spinup_team tool AND the
+    dashboard's spin-up button (one source of truth). Returns the result dict, or
+    ``{"error": "<message>"}`` on a validation / spawn failure (the tool surfaces the
+    string; the route returns the dict)."""
+    cfg = cfg or {}
+    from graph.fleet import supervisor
+    from graph.workspaces import manager
+
+    name = (name or "").strip()
+    if not name:
+        return {"error": "Error: a team name is required."}
+    if _remote_by_name(name) is not None or _team_by_name(name) is not None:
+        return {"error": f"Error: a team/board named {name!r} already exists. Pick another name or tear it down first."}
+    tmpl = (template or "").strip() or str(cfg.get("team_template", "") or "") or _default_template()
+    if not tmpl:
+        return {
+            "error": (
+                "Error: no team template. Pass template=<path to a base team langgraph-config.yaml> or set "
+                "portfolio.team_template in config. The template carries project_board + delegates + the coder "
+                "ladder; its {{REPO}} / {{TEAM_NAME}} / {{GATE}} sentinels are filled per spawn."
+            )
+        }
+    if not Path(tmpl).expanduser().exists():
+        return {"error": f"Error: team template not found: {tmpl}"}
+    repo_abs = ""
+    if repo:
+        repo_abs = str(Path(repo).expanduser().resolve())
+        if not Path(repo_abs).is_dir():
+            return {"error": f"Error: repo path not found: {repo}"}
+    # Gate: caller's value, else auto-detect from the repo so the coder must pass the
+    # project's own check before a PR — even when the caller didn't specify one.
+    gate = (gate or "").strip() or (_detect_gate(repo_abs) if repo_abs else "")
+    pdir = (plugins_dir or "").strip() or str(cfg.get("team_plugins_dir", "") or "") or _host_plugins_dir()
+
+    # 1. clone the template into a scoped workspace (config + secrets, identity restamped)
+    try:
+        ws = await asyncio.to_thread(manager.create, name, from_config=tmpl, port=(port or None))
+    except Exception as exc:  # noqa: BLE001 — surface the create failure
+        return {"error": f"Error creating team workspace: {exc}"}
+    wid = ws["id"]
+    assigned = ws["port"]
+
+    # 2. bind the repo + point at the external plugins (+ beads init + ignore the coder's
+    # per-session .proto scratch so its PRs ship clean); roll back on failure
+    try:
+        cfg_path = Path(ws["path"]) / "langgraph-config.yaml"
+        _apply_team_bindings(cfg_path, repo_abs, name, gate)
+        _ensure_plugins_dir(cfg_path, pdir)
+        if repo_abs:
+            _beads_init(repo_abs)
+            _exclude_proto_scratch(repo_abs)
+    except Exception as exc:  # noqa: BLE001
+        await asyncio.to_thread(manager.remove, wid, purge=True)
+        return {"error": f"Error binding repo into team config: {exc}"}
+
+    # 3. start the agent (it joins the fleet as a local member) + wait for it to come up.
+    try:
+        rec = await asyncio.to_thread(supervisor.start, wid)
+        assigned = rec.get("port", assigned)
+        base = f"http://127.0.0.1:{assigned}"
+        ready = await _await_ready(base)
+    except Exception as exc:  # noqa: BLE001 — best-effort rollback so a retry isn't poisoned
+        try:
+            await asyncio.to_thread(supervisor.stop, wid)
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.to_thread(manager.remove, wid, purge=True)
+        return {"error": f"Error starting team: {exc}"}
+
+    _record_team(
+        {
+            "name": name,
+            "id": wid,
+            "port": assigned,
+            "repo": repo_abs,
+            "auto_dispose": bool(auto_dispose),
+            "spawned_at": _now(),
+        }
+    )
+
+    # 4. one-time onboarding (best-effort; never fails the spawn).
+    onboarding = "skipped"
+    if onboard and repo_abs and ready:
+        try:
+            reply = await _a2a_send(base, _onboard_instruction(repo_abs))
+            onboarding = reply.strip()[:600] or "done (no summary returned)"
+        except Exception as exc:  # noqa: BLE001 — onboarding is best-effort
+            onboarding = f"attempted, but errored (team is still up): {exc}"
+    elif onboard and repo_abs and not ready:
+        onboarding = "skipped (team still booting — onboard it later or re-dispatch)"
+
+    return {
+        "team": name,
+        "id": wid,
+        "port": assigned,
+        "a2a": f"{base}/a2a",
+        "repo": repo_abs,
+        "gate": gate,
+        "auto_dispose": bool(auto_dispose),
+        "ready": ready,
+        "onboarding": onboarding,
+        "next": (
+            f"Send work with portfolio_dispatch(board={name!r}, title=..., spec=...). "
+            f"Dispose with portfolio_teardown_team({name!r}), or it self-disposes "
+            "(portfolio_autodispose) once its board drains."
+            + ("" if ready else " NOTE: still booting — give it a moment before dispatching.")
+        ),
+    }
+
+
 def _tools(cfg: dict | None = None) -> list:
     cfg = cfg or {}
 
@@ -1049,115 +1171,10 @@ def _tools(cfg: dict | None = None) -> list:
 
         Returns the team's name, port, A2A endpoint, an onboarding summary, and next steps.
         """
-        from graph.fleet import supervisor
-        from graph.workspaces import manager
-
-        name = (name or "").strip()
-        if not name:
-            return "Error: a team name is required."
-        if _remote_by_name(name) is not None or _team_by_name(name) is not None:
-            return f"Error: a team/board named {name!r} already exists. Pick another name or tear it down first."
-        tmpl = (template or "").strip() or str(cfg.get("team_template", "") or "") or _default_template()
-        if not tmpl:
-            return (
-                "Error: no team template. Pass template=<path to a base team langgraph-config.yaml> or set "
-                "portfolio.team_template in config. The template carries project_board + delegates + the coder "
-                "ladder; its {{REPO}} / {{TEAM_NAME}} / {{GATE}} sentinels are filled per spawn."
-            )
-        if not Path(tmpl).expanduser().exists():
-            return f"Error: team template not found: {tmpl}"
-        repo_abs = ""
-        if repo:
-            repo_abs = str(Path(repo).expanduser().resolve())
-            if not Path(repo_abs).is_dir():
-                return f"Error: repo path not found: {repo}"
-        # Gate: caller's value, else auto-detect from the repo so the coder must pass the
-        # project's own check before a PR — even when the caller didn't specify one.
-        gate = (gate or "").strip() or (_detect_gate(repo_abs) if repo_abs else "")
-        pdir = (plugins_dir or "").strip() or str(cfg.get("team_plugins_dir", "") or "") or _host_plugins_dir()
-
-        # 1. clone the template into a scoped workspace (config + secrets, identity restamped)
-        try:
-            ws = await asyncio.to_thread(manager.create, name, from_config=tmpl, port=(port or None))
-        except Exception as exc:  # noqa: BLE001 — surface the create failure
-            return f"Error creating team workspace: {exc}"
-        wid = ws["id"]
-        assigned = ws["port"]
-
-        # 2. bind the repo + point at the external plugins (+ beads init + ignore the
-        # coder's per-session .proto scratch so its PRs ship clean); roll back on failure
-        try:
-            cfg_path = Path(ws["path"]) / "langgraph-config.yaml"
-            _apply_team_bindings(cfg_path, repo_abs, name, gate)
-            _ensure_plugins_dir(cfg_path, pdir)
-            if repo_abs:
-                _beads_init(repo_abs)
-                _exclude_proto_scratch(repo_abs)
-        except Exception as exc:  # noqa: BLE001
-            await asyncio.to_thread(manager.remove, wid, purge=True)
-            return f"Error binding repo into team config: {exc}"
-
-        # 3. start the agent (it joins the fleet as a local member) + wait for it to come up.
-        # No add_remote: a local workspace is already an addressable fleet member, and
-        # registering it as a "remote" would collide with its own workspace name.
-        try:
-            rec = await asyncio.to_thread(supervisor.start, wid)
-            assigned = rec.get("port", assigned)
-            base = f"http://127.0.0.1:{assigned}"
-            ready = await _await_ready(base)
-        except Exception as exc:  # noqa: BLE001 — best-effort rollback so a retry isn't poisoned
-            try:
-                await asyncio.to_thread(supervisor.stop, wid)
-            except Exception:  # noqa: BLE001
-                pass
-            await asyncio.to_thread(manager.remove, wid, purge=True)
-            return f"Error starting team: {exc}"
-
-        _record_team(
-            {
-                "name": name,
-                "id": wid,
-                "port": assigned,
-                "repo": repo_abs,
-                "auto_dispose": bool(auto_dispose),
-                "spawned_at": _now(),
-            }
-        )
-
-        # 4. one-time onboarding — the team gets its repo ready (scan + hygiene + grounding +
-        # board readiness gaps) BEFORE you dispatch work, so its first PR ships clean. Routed
-        # as an A2A message (the channel a spawned team reads). Best-effort: a failure here
-        # never fails the spawn — the team is already up and dispatchable.
-        onboarding = "skipped"
-        if onboard and repo_abs and ready:
-            try:
-                reply = await _a2a_send(base, _onboard_instruction(repo_abs))
-                onboarding = reply.strip()[:600] or "done (no summary returned)"
-            except Exception as exc:  # noqa: BLE001 — onboarding is best-effort
-                onboarding = f"attempted, but errored (team is still up): {exc}"
-        elif onboard and repo_abs and not ready:
-            onboarding = "skipped (team still booting — onboard it later or re-dispatch)"
-
-        return json.dumps(
-            {
-                "team": name,
-                "id": wid,
-                "port": assigned,
-                "a2a": f"{base}/a2a",
-                "repo": repo_abs,
-                "gate": gate,
-                "auto_dispose": bool(auto_dispose),
-                "ready": ready,
-                "onboarding": onboarding,
-                "next": (
-                    f"Send work with portfolio_dispatch(board={name!r}, title=..., spec=...). "
-                    f"Dispose with portfolio_teardown_team({name!r}), or it self-disposes "
-                    "(portfolio_autodispose) once its board drains."
-                    + ("" if ready else " NOTE: still booting — give it a moment before dispatching.")
-                ),
-            },
-            indent=2,
-        )
+        result = await _spinup_team(name, repo, template, gate, port, auto_dispose, plugins_dir, onboard, cfg=cfg)
+        if "error" in result:
+            return result["error"]
+        return json.dumps(result, indent=2)
 
     @tool
     async def portfolio_teams() -> str:
