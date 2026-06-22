@@ -413,6 +413,60 @@ def _beads_init(repo: str) -> None:
         pass
 
 
+def _detect_gate(repo: str) -> str:
+    """The repo's real pre-PR check command, inferred from its build files — so the team's
+    coder must pass the project's own gate before a PR opens, even when the caller didn't
+    pass one. Same heuristics as team-up.sh: a Python project lints, a VitePress site
+    builds the docs, a generic Node project tests. Empty when nothing's recognized (the
+    onboard-project skill can still set a smarter one)."""
+    r = Path(repo)
+    if (r / "pyproject.toml").exists() or (r / "requirements-dev.txt").exists():
+        return "ruff check . && ruff format --check ."
+    pkg = r / "package.json"
+    if pkg.exists():
+        try:
+            text = pkg.read_text()
+        except OSError:
+            text = ""
+        if '"vitepress"' in text:
+            return "npm ci && npm run docs:build"
+        return "npm ci && npm test"
+    return ""
+
+
+def _onboard_instruction(repo: str) -> str:
+    """The one-time 'get this repo ready' brief sent to a freshly-spawned team. Reaches the
+    team as an A2A message (the channel a spawned team reliably reads — its persona falls
+    back to the host's SOUL, so readiness rides on this instruction + the team's loaded
+    onboard-project skill, not on a per-team persona)."""
+    return (
+        "Before any feature work, get this repo ready for the board. Run your onboard-project "
+        f"skill on the repo at {repo}:\n"
+        "- Scan it (stack, build/test command, .gitignore, grounding doc, git posture).\n"
+        "- Auto-fix the safe, deterministic gaps directly via your coder (e.g. a grounding/"
+        "PROTO.md doc if missing, ignoring build output) — do NOT blanket-ignore .proto (its "
+        "evolve/ holds versioned skills; only session scratch is ignored, already handled).\n"
+        "- Board the judgment gaps (a grounding doc, PR CI) as features if they need real work.\n"
+        "Report a short readiness summary: PASS / FIXED / BOARDED per item. Do not invent work "
+        "beyond readiness — the actual task will be dispatched separately."
+    )
+
+
+async def _a2a_send(base: str, instruction: str, *, token: str = "", timeout: int = 240) -> str:
+    """Send a plain instruction to a team over A2A and return its reply. Used for the
+    one-time onboarding kick (portfolio_dispatch uses the create-feature wrapper instead)."""
+    from plugins.delegates.adapters import ADAPTERS, Delegate
+
+    d = Delegate(
+        name="team",
+        type="a2a",
+        url=base.rstrip("/") + "/a2a",
+        auth_scheme="bearer" if token else "",
+        auth_token=token,
+    )
+    return await ADAPTERS["a2a"].dispatch(d, instruction, timeout=timeout)
+
+
 # The proto coding agent writes a repo-level .proto/ dir mixing PER-SESSION SCRATCH
 # (memory/, session-notes.md, repo-map-cache.json) with protoCLI-MANAGED state
 # (.proto/evolve/ holds skills). A blanket `.proto/` ignore would hide the skills, so we
@@ -894,6 +948,7 @@ def _tools(cfg: dict | None = None) -> list:
         port: int = 0,
         auto_dispose: bool = True,
         plugins_dir: str = "",
+        onboard: bool = True,
     ) -> str:
         """Spin up an EPHEMERAL engineering team for a project — a finite-lifetime team-
         agent you spawn on demand, dispatch work to, and dispose when the board drains.
@@ -902,8 +957,9 @@ def _tools(cfg: dict | None = None) -> list:
         team's plugins — project_board + delegates — and its coder ladder) into a scoped
         workspace, binds ``repo`` into it (filling the ``{{REPO}}`` / ``{{TEAM_NAME}}`` /
         ``{{GATE}}`` sentinels in the template), points it at the external plugins it needs,
-        starts the agent, and registers it as a team board — so the existing
-        portfolio_dispatch / portfolio_board_read / rollup tools address it by ``name``.
+        starts the agent, registers it as a team board, and (by default) has the team
+        ONBOARD the repo before you dispatch work — so the existing portfolio_dispatch /
+        portfolio_board_read / rollup tools address it by ``name`` and its first PR ships clean.
 
         Args:
             name: The team name (also its fleet/A2A name + board prefix). Must be unique.
@@ -912,7 +968,8 @@ def _tools(cfg: dict | None = None) -> list:
             template: Path to the base team langgraph-config.yaml (or its config dir; a
                 sibling secrets.yaml is cloned too). Defaults to ``portfolio.team_template``
                 config, then to the plugin's shipped example template — so you can omit it.
-            gate: Pre-PR gate command for the team (fills ``{{GATE}}``). Optional.
+            gate: Pre-PR gate command for the team (fills ``{{GATE}}``). Empty = auto-detected
+                from the repo (Python→ruff, VitePress→docs:build, Node→npm test).
             port: Bind port (0 = auto-assign the next free fleet port).
             auto_dispose: If true (default), portfolio_autodispose will tear this team
                 down once its board drains. Set false for a team you'll dispose by hand.
@@ -920,8 +977,11 @@ def _tools(cfg: dict | None = None) -> list:
                 Defaults to the PM host's own plugins dir, so a spawned team reuses what the
                 host already has installed — no per-team reinstall. (delegates is builtin and
                 plugin-devkit is in-tree, so those load regardless.) Override only to isolate.
+            onboard: If true (default) and a repo is given, the team runs its onboard-project
+                skill once before you dispatch work — scan, auto-fix hygiene, write a grounding
+                doc, board readiness gaps. Best-effort; never fails the spawn. Set false to skip.
 
-        Returns the team's name, port, A2A endpoint, and the next-step dispatch call.
+        Returns the team's name, port, A2A endpoint, an onboarding summary, and next steps.
         """
         from graph.fleet import supervisor
         from graph.workspaces import manager
@@ -945,6 +1005,9 @@ def _tools(cfg: dict | None = None) -> list:
             repo_abs = str(Path(repo).expanduser().resolve())
             if not Path(repo_abs).is_dir():
                 return f"Error: repo path not found: {repo}"
+        # Gate: caller's value, else auto-detect from the repo so the coder must pass the
+        # project's own check before a PR — even when the caller didn't specify one.
+        gate = (gate or "").strip() or (_detect_gate(repo_abs) if repo_abs else "")
         pdir = (plugins_dir or "").strip() or str(cfg.get("team_plugins_dir", "") or "") or _host_plugins_dir()
 
         # 1. clone the template into a scoped workspace (config + secrets, identity restamped)
@@ -994,6 +1057,21 @@ def _tools(cfg: dict | None = None) -> list:
                 "spawned_at": _now(),
             }
         )
+
+        # 4. one-time onboarding — the team gets its repo ready (scan + hygiene + grounding +
+        # board readiness gaps) BEFORE you dispatch work, so its first PR ships clean. Routed
+        # as an A2A message (the channel a spawned team reads). Best-effort: a failure here
+        # never fails the spawn — the team is already up and dispatchable.
+        onboarding = "skipped"
+        if onboard and repo_abs and ready:
+            try:
+                reply = await _a2a_send(base, _onboard_instruction(repo_abs))
+                onboarding = reply.strip()[:600] or "done (no summary returned)"
+            except Exception as exc:  # noqa: BLE001 — onboarding is best-effort
+                onboarding = f"attempted, but errored (team is still up): {exc}"
+        elif onboard and repo_abs and not ready:
+            onboarding = "skipped (team still booting — onboard it later or re-dispatch)"
+
         return json.dumps(
             {
                 "team": name,
@@ -1001,8 +1079,10 @@ def _tools(cfg: dict | None = None) -> list:
                 "port": assigned,
                 "a2a": f"{base}/a2a",
                 "repo": repo_abs,
+                "gate": gate,
                 "auto_dispose": bool(auto_dispose),
                 "ready": ready,
+                "onboarding": onboarding,
                 "next": (
                     f"Send work with portfolio_dispatch(board={name!r}, title=..., spec=...). "
                     f"Dispose with portfolio_teardown_team({name!r}), or it self-disposes "
