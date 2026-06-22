@@ -680,6 +680,27 @@ def _ensure_plugins_dir(cfg_path: Path, plugins_dir: str) -> None:
     save_yaml_doc(doc, cfg_path)
 
 
+def _set_board_db(cfg_path: Path, db: str) -> None:
+    """Isolate the team's board: point ``project_board.db_path`` at the team's OWN beads DB
+    (in its scoped workspace) instead of the repo's committed ``.beads``. So a spawned team
+    never sees / resumes the repo's native board and never pollutes it — the board is
+    ephemeral PM tracking, purged with the workspace on teardown. projectBoard-plugin honors
+    db_path in both the loop and the tools, and skips the repo ``br init`` when it's set.
+    Respect a db_path the template already declares. Comment-preserving (ruamel)."""
+    if not db:
+        return
+    from graph.config_io import load_yaml_doc, save_yaml_doc
+
+    doc = load_yaml_doc(cfg_path)
+    if not isinstance(doc, dict):
+        return
+    pb = doc.setdefault("project_board", {})
+    if not isinstance(pb, dict) or pb.get("db_path"):
+        return  # template pinned its own board db — don't override
+    pb["db_path"] = db
+    save_yaml_doc(doc, cfg_path)
+
+
 async def _await_ready(base: str, timeout: float = 40.0) -> bool:
     """Poll a freshly-started team's ``/healthz`` until it's up (or timeout). A spawned
     server boots its plugins asynchronously, so the returned A2A endpoint isn't dispatch-
@@ -791,6 +812,7 @@ async def _spinup_team(
     plugins_dir: str = "",
     onboard: bool = True,
     archetype: str = "",
+    shared_board: bool = False,
     *,
     cfg: dict | None = None,
 ) -> dict:
@@ -847,16 +869,23 @@ async def _spinup_team(
     wid = ws["id"]
     assigned = ws["port"]
 
-    # 2. bind the repo + point at the external plugins (+ beads init + ignore the coder's
-    # per-session .proto scratch + FRESHEN the repo so the team works on current code);
-    # roll back on failure
+    # 2. bind the repo + point at the external plugins + ISOLATE the board (its own beads DB,
+    # not the repo's .beads — so the team never sees/resumes the repo's native board nor
+    # pollutes it) + ignore the coder's .proto scratch + FRESHEN the repo so the team works on
+    # current code; roll back on failure
     freshness = "n/a (no repo)"
+    board_mode = "shared (repo .beads)" if shared_board else "isolated"
     try:
         cfg_path = Path(ws["path"]) / "langgraph-config.yaml"
         _apply_team_bindings(cfg_path, repo_abs, name, gate)
         _ensure_plugins_dir(cfg_path, pdir)
+        if not shared_board:
+            # Isolated (default): the team's board lives in its own scoped workspace, purged
+            # on teardown. projectBoard-plugin honors db_path + skips the repo `br init`.
+            _set_board_db(cfg_path, str(Path(ws["path"]) / "board.beads.db"))
         if repo_abs:
-            _beads_init(repo_abs)
+            if shared_board:
+                _beads_init(repo_abs)  # opt-in: the team IS this repo's dev team → repo board
             _exclude_proto_scratch(repo_abs)
             freshness = await asyncio.to_thread(_freshen_repo, repo_abs)
     except Exception as exc:  # noqa: BLE001
@@ -907,6 +936,7 @@ async def _spinup_team(
         "repo": repo_abs,
         "gate": gate,
         "repo_freshness": freshness,
+        "board": board_mode,
         "auto_dispose": bool(auto_dispose),
         "ready": ready,
         "onboarding": onboarding,
@@ -1206,9 +1236,15 @@ def _tools(cfg: dict | None = None) -> list:
         plugins_dir: str = "",
         onboard: bool = True,
         archetype: str = "",
+        shared_board: bool = False,
     ) -> str:
         """Spin up an EPHEMERAL engineering team for a project — a finite-lifetime team-
         agent you spawn on demand, dispatch work to, and dispose when the board drains.
+
+        The team's board is ISOLATED by default — its own scoped beads DB, not the repo's
+        committed ``.beads`` — so it only works what you dispatch and never sees / resumes /
+        pollutes the repo's native board. Pass ``shared_board=True`` only when the team IS
+        that repo's dev team and should use the repo's own board.
 
         For a repo you work OFTEN, pass ``archetype=<name>`` (see portfolio_archetypes) — a
         prebuilt preset that fills repo/gate/template, so spinning up is just
@@ -1249,7 +1285,7 @@ def _tools(cfg: dict | None = None) -> list:
         and next steps.
         """
         result = await _spinup_team(
-            name, repo, template, gate, port, auto_dispose, plugins_dir, onboard, archetype, cfg=cfg
+            name, repo, template, gate, port, auto_dispose, plugins_dir, onboard, archetype, shared_board, cfg=cfg
         )
         if "error" in result:
             return result["error"]

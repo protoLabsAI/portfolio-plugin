@@ -416,6 +416,7 @@ def build_data_router(cfg: dict | None = None):
             auto_dispose=bool(body.get("auto_dispose", True)),
             onboard=bool(body.get("onboard", False)),
             archetype=(body.get("archetype") or "").strip(),
+            shared_board=bool(body.get("shared_board", False)),
             cfg=cfg,
         )
 
