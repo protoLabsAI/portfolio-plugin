@@ -213,3 +213,32 @@ def test_plan_route_empty_when_no_links(monkeypatch):
         "ready_to_dispatch": [],
         "blocked": [],
     }
+
+
+def test_plan_resolves_LOCAL_spawned_team_boards(monkeypatch):
+    """Regression: the plan must see LOCAL spawned-team boards (status), not only remotes
+    (list_remotes) — else a spawned team's links always read 'dangling'."""
+    from graph.fleet import supervisor
+
+    link = {"id": "l1", "from_board": "teamb", "from_feature": "b-ui", "to_board": "showteam", "to_feature": "f1"}
+    monkeypatch.setattr(portfolio, "_load_links", lambda: [link])
+    monkeypatch.setattr(supervisor, "list_remotes", lambda: [])  # NO remotes — both are local
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda: [
+            {"name": "host", "host": True},
+            {"name": "showteam", "id": "s1", "port": 7873},
+            {"name": "teamb", "id": "t1", "port": 7874},
+        ],
+    )
+
+    async def fake_fetch(rec, state=""):
+        return {"showteam": [{"id": "f1", "board_state": "ready"}], "teamb": []}.get(rec["name"], [])
+
+    monkeypatch.setattr(portfolio, "_fetch_board_features", fake_fetch)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    plan = TestClient(app).get("/api/plugins/portfolio/plan").json()
+    # showteam·f1 exists (ready, not done) → BLOCKING, not dangling
+    assert plan["links"][0]["status"] == "blocking"

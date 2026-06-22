@@ -76,6 +76,36 @@ def _remote_by_name(name: str) -> dict | None:
     return None
 
 
+def _all_board_recs() -> list[dict]:
+    """Every board the PM can reach — REMOTE members (carry a bearer) AND LOCAL spawned-team
+    members (``127.0.0.1:<port>``). The rollup / diff / plan paths were written for the
+    remote-only model (``list_remotes``); a spawned team is a LOCAL member (``status``), so
+    those paths silently missed it — boards showed empty, cross-board links read as
+    ``dangling``. Resolving every name through ``_remote_by_name`` unifies the two (one
+    deduped rec per board, the remote's token preserved)."""
+    from graph.fleet import supervisor
+
+    names: list[str] = [r.get("name") for r in supervisor.list_remotes()]
+    try:
+        for m in supervisor.status():
+            if m.get("host") or m.get("remote"):
+                continue  # the PM itself / remotes already counted above
+            if m.get("name"):
+                names.append(m["name"])
+    except Exception:  # noqa: BLE001 — a status hiccup shouldn't blank the boards
+        pass
+    seen: set = set()
+    recs: list[dict] = []
+    for n in names:
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        rec = _remote_by_name(n)
+        if rec:
+            recs.append(rec)
+    return recs
+
+
 class _BoardUnavailable(Exception):
     """A team board couldn't be read (policy block, 404, HTTP error, network)."""
 
@@ -200,9 +230,7 @@ async def _compute_portfolio_diff(wanted: set | None) -> dict:
     """Fan out across the (filtered) team boards, diff each against the saved baseline,
     and rewrite the baseline. Returns ``{recs, first_run, changes}``. On the first run
     (no baseline) it records the baseline and reports nothing — there's no 'before'."""
-    from graph.fleet import supervisor
-
-    recs = [r for r in supervisor.list_remotes() if wanted is None or r.get("name") in wanted or r.get("id") in wanted]
+    recs = [r for r in _all_board_recs() if wanted is None or r.get("name") in wanted or r.get("id") in wanted]
     snap = _load_snapshot()
     first_run = not snap
 
@@ -315,9 +343,7 @@ async def _compute_plan() -> dict:
     links = _load_links()
     if not links:
         return {"links": [], "ready_to_dispatch": [], "blocked": []}
-    from graph.fleet import supervisor
-
-    by_board, unreachable = await _fetch_all(supervisor.list_remotes())
+    by_board, unreachable = await _fetch_all(_all_board_recs())
     state = {}
     for name, feats in by_board.items():
         for f in feats:
@@ -752,12 +778,8 @@ def _tools(cfg: dict | None = None) -> list:
         reason over MANY boards at once without pulling each one raw. Optional comma-
         separated ``boards`` filters to specific team-agent names (default = all). An
         unreachable board is reported with an ``error`` instead of failing the rollup."""
-        from graph.fleet import supervisor
-
         wanted = {b.strip() for b in boards.split(",") if b.strip()} if boards else None
-        recs = [
-            r for r in supervisor.list_remotes() if wanted is None or r.get("name") in wanted or r.get("id") in wanted
-        ]
+        recs = [r for r in _all_board_recs() if wanted is None or r.get("name") in wanted or r.get("id") in wanted]
         if not recs:
             return (
                 "No matching team boards. Call portfolio_boards to list them."
@@ -919,9 +941,7 @@ def _tools(cfg: dict | None = None) -> list:
         pending = [ln for ln in links if ln.get("spec") and not ln.get("dispatched")]
         if not pending:
             return "No pending planned-dispatch links. Create one with portfolio_link(..., title=, spec=)."
-        from graph.fleet import supervisor
-
-        by_board, unreachable = await _fetch_all(supervisor.list_remotes())
+        by_board, unreachable = await _fetch_all(_all_board_recs())
         done = {
             (name, f["id"])
             for name, feats in by_board.items()
