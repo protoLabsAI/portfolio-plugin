@@ -54,6 +54,18 @@ def test_view_page_is_four_rules_compliant():
     assert 'addEventListener("message"' not in html
 
 
+def test_view_page_has_tabs_drilldown_and_graph():
+    html = view.VIEW_PAGE
+    # two tabs
+    assert 'data-tab="boards"' in html and 'data-tab="deps"' in html
+    # cards are clickable → drill into a board's features
+    assert "data-board" in html and "openBoard" in html
+    assert "/api/plugins/portfolio/board/" in html
+    # the dependency graph + plan
+    assert "depGraph" in html and "/api/plugins/portfolio/plan" in html
+    assert "<svg" in html and "marker-end" in html  # the SVG edges
+
+
 def test_view_page_served_public_not_gated():
     app = FastAPI()
     app.include_router(view.build_view_router(), prefix="/plugins/portfolio")
@@ -141,3 +153,63 @@ def test_overview_empty_when_no_boards(monkeypatch):
     app = FastAPI()
     app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
     assert TestClient(app).get("/api/plugins/portfolio/overview").json() == {"boards": []}
+
+
+# ── /board/{name} — the card drill-down ──────────────────────────────────────────
+
+
+def test_board_route_returns_full_feature_list(overview_app):
+    d = overview_app.get("/api/plugins/portfolio/board/alpha").json()
+    assert d["board"] == "alpha"
+    assert [f["id"] for f in d["features"]] == ["1", "2"]  # the full list, untruncated
+
+
+def test_board_route_unresolvable(monkeypatch):
+    monkeypatch.setattr(portfolio, "_remote_by_name", lambda n: None)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    d = TestClient(app).get("/api/plugins/portfolio/board/nope").json()
+    assert d["features"] == [] and "not resolvable" in d["error"]
+
+
+# ── /plan — the cross-board dependency graph ─────────────────────────────────────
+
+
+def test_plan_route_reflects_compute_plan(monkeypatch):
+    from graph.fleet import supervisor
+
+    link = {"id": "lnk-1", "from_board": "web", "from_feature": "f2", "to_board": "api", "to_feature": "f1"}
+    monkeypatch.setattr(portfolio, "_load_links", lambda: [link])
+    monkeypatch.setattr(
+        supervisor,
+        "list_remotes",
+        lambda: [
+            {"id": "a", "name": "api", "url": "http://api", "token": ""},
+            {"id": "w", "name": "web", "url": "http://web", "token": ""},
+        ],
+    )
+
+    async def fake_fetch(rec, state=""):
+        return {"api": [{"id": "f1", "board_state": "done"}], "web": [{"id": "f2", "board_state": "ready"}]}[
+            rec["name"]
+        ]
+
+    monkeypatch.setattr(portfolio, "_fetch_board_features", fake_fetch)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    plan = TestClient(app).get("/api/plugins/portfolio/plan").json()
+    # the link's blocker (api·f1) is done → satisfied; web·f2 is ready to dispatch
+    assert plan["links"][0]["status"] == "satisfied"
+    assert plan["ready_to_dispatch"] == [{"board": "web", "feature": "f2", "state": "ready"}]
+    assert plan["blocked"] == []
+
+
+def test_plan_route_empty_when_no_links(monkeypatch):
+    monkeypatch.setattr(portfolio, "_load_links", lambda: [])
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    assert TestClient(app).get("/api/plugins/portfolio/plan").json() == {
+        "links": [],
+        "ready_to_dispatch": [],
+        "blocked": [],
+    }
