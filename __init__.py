@@ -1056,7 +1056,19 @@ async def _spinup_team(
     elif onboard and repo_abs and not ready:
         onboarding = "skipped (team still booting — onboard it later or re-dispatch)"
 
-    return {
+    # Non-fatal board prereq: the team's board runs on the beads `br` CLI. It's not gated in
+    # preflight (a host-PATH check would false-fail CI runners), but surface it here so a
+    # missing `br` — which errors the board tools the moment they run — isn't a silent surprise.
+    import shutil
+
+    board_warn = (
+        ""
+        if shutil.which("br")
+        else "beads CLI 'br' not found on PATH — the team's board tools will fail until it's "
+        "installed on this host (see the projectBoard-plugin README)."
+    )
+
+    result = {
         "team": name,
         "id": wid,
         "port": assigned,
@@ -1075,6 +1087,9 @@ async def _spinup_team(
             + ("" if ready else " NOTE: still booting — give it a moment before dispatching.")
         ),
     }
+    if board_warn:
+        result["warning"] = board_warn
+    return result
 
 
 def _tools(cfg: dict | None = None) -> list:

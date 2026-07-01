@@ -886,3 +886,32 @@ async def test_spinup_preflight_rejects_a_credless_team(fleet, template, tmp_pat
     assert "preflight failed" in out and "no model gateway" in out
     assert portfolio._team_by_name("bad") is None  # never recorded
     assert "bad-abcd" in fleet["removed"]  # workspace rolled back
+
+
+@pytest.mark.asyncio
+async def test_spinup_warns_when_br_missing(fleet, template, tmp_path, monkeypatch):
+    """A team boots without `br`, but its board tools will fail — surface a NON-fatal warning
+    (the team still spawns; `br` isn't gated in preflight to keep CI green)."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "br" else "/usr/bin/x")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = json.loads(
+        await _tool("portfolio_spinup_team").ainvoke({"name": "nobr", "repo": str(repo), "template": str(template)})
+    )
+    assert out["team"] == "nobr" and out["ready"] is True  # still spawned (non-fatal)
+    assert "beads CLI 'br'" in out.get("warning", "")
+
+
+@pytest.mark.asyncio
+async def test_spinup_no_warning_when_br_present(fleet, template, tmp_path, monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/br")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = json.loads(
+        await _tool("portfolio_spinup_team").ainvoke({"name": "hasbr", "repo": str(repo), "template": str(template)})
+    )
+    assert "warning" not in out
