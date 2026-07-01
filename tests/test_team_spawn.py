@@ -791,6 +791,24 @@ def test_inherit_host_gateway_fills_api_base_when_template_blank(tmp_path, monke
     assert m["name"] == "protolabs/reasoning"  # the team's brain is preserved — only the gateway is filled
 
 
+def test_inherit_host_gateway_prefers_resolved_live_config(tmp_path, monkeypatch):
+    """The RESOLVED live config (STATE.graph_config) is the source of truth — so a gateway
+    that lives in the box-tier host-config.yaml (empty in the instance yaml) is still
+    inherited. Regression for the layer the live round-trip surfaced."""
+    import types
+
+    import yaml
+
+    import runtime.state as rs
+
+    # instance yaml has NO gateway (mirrors this box: api_base is a box/host-cascade field)
+    _host(tmp_path, monkeypatch, api_base="")
+    monkeypatch.setattr(rs, "STATE", types.SimpleNamespace(graph_config=types.SimpleNamespace(api_base="https://resolved/v1", api_key="")))
+    cfg = _team_cfg(tmp_path, "model:\n  api_base: ''\n")
+    portfolio._inherit_host_gateway(cfg)
+    assert yaml.safe_load(cfg.read_text())["model"]["api_base"] == "https://resolved/v1"
+
+
 def test_inherit_host_gateway_respects_template_gateway(tmp_path, monkeypatch):
     import yaml
 

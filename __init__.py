@@ -701,20 +701,55 @@ def _set_board_db(cfg_path: Path, db: str) -> None:
     save_yaml_doc(doc, cfg_path)
 
 
+def _host_gateway() -> tuple[str, str]:
+    """The PM host's RESOLVED model gateway ``(api_base, api_key)``.
+
+    Sourced from the LIVE config (``runtime.state.STATE.graph_config``), which is the ADR
+    0047 App→Host→Agent cascade already resolved — so it works whether ``api_base`` sits in
+    the box-tier ``host-config.yaml`` (the common case: a host-scoped field shared by every
+    instance on the box) or the instance's own ``langgraph-config.yaml``. Reading the raw
+    instance yaml alone would MISS a box-layer gateway (empty there) — the bug the live
+    round-trip surfaced. Falls back to the instance yaml if the live config isn't up yet.
+
+    ``api_key`` is frequently empty here — it's read from ``OPENAI_API_KEY`` at call time
+    (the gateway master key), and rides ``os.environ`` into the spawned child via
+    supervisor.start — so a blank key is fine; the ``api_base`` (no env fallback in graph.llm)
+    is the piece that must be carried."""
+    try:
+        from runtime.state import STATE
+
+        gc = STATE.graph_config
+        base = str(getattr(gc, "api_base", "") or "").strip()
+        if base:
+            return base, str(getattr(gc, "api_key", "") or "").strip()
+    except Exception:  # noqa: BLE001 — STATE not populated (odd load order) → fall back to disk
+        pass
+    try:
+        import yaml
+
+        from graph.config_io import config_yaml_path
+
+        host = yaml.safe_load(Path(config_yaml_path()).read_text()) or {}
+        m = host.get("model") if isinstance(host, dict) else {}
+        return str((m or {}).get("api_base") or "").strip(), str((m or {}).get("api_key") or "").strip()
+    except (OSError, ValueError):
+        return "", ""
+
+
 def _inherit_host_gateway(cfg_path: Path) -> None:
     """Fill the spawned team's model GATEWAY from the PM host's own config, so a team spun
     from the shipped example template (which ships ``api_base: ""`` + no secrets) boots
     ready-to-think instead of onto a dead gateway — the #1 spinup gotcha.
 
-    The team inherits the host's ``model.api_base`` (and ``api_key`` when the host keeps one
-    on disk), plus the host's ``secrets.yaml`` when the team has none — so the gateway URL +
-    key are present without the operator hand-prepping a creds template. We GAP-FILL only:
+    The team inherits the host's RESOLVED ``model.api_base`` (and ``api_key`` when the host
+    exposes one), plus the host's ``secrets.yaml`` when the team has none — so the gateway URL
+    + key are present without the operator hand-prepping a creds template. We GAP-FILL only:
     the template's own ``provider`` / ``name`` / ``temperature`` (the team's brain) are kept,
     and a template that already set its own ``api_base`` (a per-team gateway) is left alone.
-    (Note the key ALSO rides ``os.environ`` into the child via supervisor.start, so an
-    env-only key still reaches the team; this covers the ``api_base``, which has no env
-    fallback in graph.llm.) Best-effort + comment-preserving (ruamel)."""
-    from graph.config_io import config_yaml_path, load_yaml_doc, save_yaml_doc, secrets_yaml_path
+    (The key ALSO rides ``os.environ`` into the child via supervisor.start, so an env-only key
+    still reaches the team; this carries the ``api_base``, which has no env fallback in
+    graph.llm.) Best-effort + comment-preserving (ruamel)."""
+    from graph.config_io import load_yaml_doc, save_yaml_doc, secrets_yaml_path
 
     doc = load_yaml_doc(cfg_path)
     if not isinstance(doc, dict):
@@ -723,21 +758,12 @@ def _inherit_host_gateway(cfg_path: Path) -> None:
     if not isinstance(model, dict) or str(model.get("api_base") or "").strip():
         return  # the template carries its own gateway — respect it (per-team gateway)
 
-    try:  # read the host's model as PLAIN data (never graft a ruamel node across docs)
-        import yaml
-
-        host = yaml.safe_load(Path(config_yaml_path()).read_text()) or {}
-    except (OSError, ValueError):
-        return
-    hmodel = host.get("model") if isinstance(host, dict) else None
-    host_base = str((hmodel or {}).get("api_base") or "").strip()
+    host_base, host_key = _host_gateway()
     if not host_base:
-        return  # host runs on an env/gateway with no on-disk base — nothing to inherit here
+        return  # host itself has no resolvable gateway — nothing to inherit (preflight will flag)
     model["api_base"] = host_base
-    if not str(model.get("api_key") or "").strip():
-        host_key = str((hmodel or {}).get("api_key") or "").strip()
-        if host_key:
-            model["api_key"] = host_key
+    if host_key and not str(model.get("api_key") or "").strip():
+        model["api_key"] = host_key
     save_yaml_doc(doc, cfg_path)
 
     # Carry the host's secrets overlay (the gateway key) onto the team when it has none of its

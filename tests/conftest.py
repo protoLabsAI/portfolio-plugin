@@ -95,6 +95,15 @@ if "graph.config_io" not in sys.modules:
     sys.modules["graph"].config_io = cio
 
 
+# ── runtime.state — the live resolved config (_host_gateway reads STATE.graph_config) ──
+if "runtime.state" not in sys.modules:
+    _pkg("runtime")
+    st = types.ModuleType("runtime.state")
+    st.STATE = types.SimpleNamespace(graph_config=None)  # default: no live config → disk fallback
+    sys.modules["runtime.state"] = st
+    sys.modules["runtime"].state = st
+
+
 # ── graph.plugins.installer — where git-installed plugins live ───────────────────
 if "graph.plugins.installer" not in sys.modules:
     _pkg("graph")
