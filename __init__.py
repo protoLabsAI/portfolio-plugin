@@ -701,6 +701,95 @@ def _set_board_db(cfg_path: Path, db: str) -> None:
     save_yaml_doc(doc, cfg_path)
 
 
+def _inherit_host_gateway(cfg_path: Path) -> None:
+    """Fill the spawned team's model GATEWAY from the PM host's own config, so a team spun
+    from the shipped example template (which ships ``api_base: ""`` + no secrets) boots
+    ready-to-think instead of onto a dead gateway — the #1 spinup gotcha.
+
+    The team inherits the host's ``model.api_base`` (and ``api_key`` when the host keeps one
+    on disk), plus the host's ``secrets.yaml`` when the team has none — so the gateway URL +
+    key are present without the operator hand-prepping a creds template. We GAP-FILL only:
+    the template's own ``provider`` / ``name`` / ``temperature`` (the team's brain) are kept,
+    and a template that already set its own ``api_base`` (a per-team gateway) is left alone.
+    (Note the key ALSO rides ``os.environ`` into the child via supervisor.start, so an
+    env-only key still reaches the team; this covers the ``api_base``, which has no env
+    fallback in graph.llm.) Best-effort + comment-preserving (ruamel)."""
+    from graph.config_io import config_yaml_path, load_yaml_doc, save_yaml_doc, secrets_yaml_path
+
+    doc = load_yaml_doc(cfg_path)
+    if not isinstance(doc, dict):
+        return
+    model = doc.setdefault("model", {})
+    if not isinstance(model, dict) or str(model.get("api_base") or "").strip():
+        return  # the template carries its own gateway — respect it (per-team gateway)
+
+    try:  # read the host's model as PLAIN data (never graft a ruamel node across docs)
+        import yaml
+
+        host = yaml.safe_load(Path(config_yaml_path()).read_text()) or {}
+    except (OSError, ValueError):
+        return
+    hmodel = host.get("model") if isinstance(host, dict) else None
+    host_base = str((hmodel or {}).get("api_base") or "").strip()
+    if not host_base:
+        return  # host runs on an env/gateway with no on-disk base — nothing to inherit here
+    model["api_base"] = host_base
+    if not str(model.get("api_key") or "").strip():
+        host_key = str((hmodel or {}).get("api_key") or "").strip()
+        if host_key:
+            model["api_key"] = host_key
+    save_yaml_doc(doc, cfg_path)
+
+    # Carry the host's secrets overlay (the gateway key) onto the team when it has none of its
+    # own — belt-and-suspenders with the env-inherited key. Never clobber a real team secrets.
+    try:
+        team_sec = cfg_path.parent / "secrets.yaml"
+        host_sec = Path(secrets_yaml_path())
+        team_has = team_sec.exists() and any(
+            ln.strip() and not ln.lstrip().startswith("#") for ln in team_sec.read_text().splitlines()
+        )
+        if host_sec.exists() and not team_has:
+            import shutil
+
+            shutil.copyfile(host_sec, team_sec)
+    except OSError:
+        pass
+
+
+def _preflight_team(cfg_path: Path) -> str:
+    """Return an actionable error string if the assembled team can't actually reach a model —
+    so a mis-configured spinup fails LOUDLY here instead of booting a team that silently can't
+    think and ships nothing. Empty string = good to go.
+
+    Checks a resolvable model gateway: ``model.api_base`` (after inheritance) and a key from
+    config / the team's secrets overlay / the inherited ``OPENAI_API_KEY`` env. (The beads
+    ``br`` CLI the board needs is a documented host prereq, not gated here — a missing ``br``
+    surfaces loudly the moment the board loop runs.)"""
+    import os
+
+    from graph.config_io import load_yaml_doc
+
+    doc = load_yaml_doc(cfg_path)
+    model = (doc or {}).get("model") or {}
+    if not str(model.get("api_base") or "").strip():
+        return (
+            "no model gateway — the team template has no model.api_base and the PM host has none to "
+            "inherit. Set portfolio.team_template to a creds-filled team config, or configure the host's "
+            "model.api_base."
+        )
+    team_sec = cfg_path.parent / "secrets.yaml"
+    has_secret = team_sec.exists() and any(
+        ln.strip() and not ln.lstrip().startswith("#") for ln in team_sec.read_text().splitlines()
+    )
+    if not (str(model.get("api_key") or "").strip() or has_secret or os.environ.get("OPENAI_API_KEY", "").strip()):
+        return (
+            "no model gateway key — set OPENAI_API_KEY in the PM's environment, put a key in the team "
+            "template's secrets.yaml, or set model.api_key. The team can reach the gateway URL but can't "
+            "authenticate."
+        )
+    return ""
+
+
 async def _await_ready(base: str, timeout: float = 40.0) -> bool:
     """Poll a freshly-started team's ``/healthz`` until it's up (or timeout). A spawned
     server boots its plugins asynchronously, so the returned A2A endpoint isn't dispatch-
@@ -886,6 +975,9 @@ async def _spinup_team(
             board_db = Path(ws["path"]) / ".beads" / "board.db"
             board_db.parent.mkdir(parents=True, exist_ok=True)
             _set_board_db(cfg_path, str(board_db))
+        # Inherit the PM host's model gateway when the template didn't carry one — so a team
+        # spun from the shipped example boots ready-to-think instead of onto a dead gateway.
+        _inherit_host_gateway(cfg_path)
         if repo_abs:
             if shared_board:
                 _beads_init(repo_abs)  # opt-in: the team IS this repo's dev team → repo board
@@ -894,6 +986,13 @@ async def _spinup_team(
     except Exception as exc:  # noqa: BLE001
         await asyncio.to_thread(manager.remove, wid, purge=True)
         return {"error": f"Error binding repo into team config: {exc}"}
+
+    # 2b. preflight: fail LOUDLY on a config that can't run (no gateway / no key / no `br`)
+    # instead of booting a team that silently ships nothing. Roll the workspace back first.
+    problem = _preflight_team(cfg_path)
+    if problem:
+        await asyncio.to_thread(manager.remove, wid, purge=True)
+        return {"error": f"Team preflight failed — {problem}"}
 
     # 3. start the agent (it joins the fleet as a local member) + wait for it to come up.
     try:

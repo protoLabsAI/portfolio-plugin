@@ -1,6 +1,6 @@
 id: portfolio
 name: Portfolio (multi-team orchestration)
-version: 0.13.1
+version: 0.14.0
 description: >-
   The PM / program orchestration layer (ADR 0055 P1). One agent orchestrates work
   across MANY team-agents, each running its own project board for its own repo
@@ -29,6 +29,11 @@ description: >-
   board, so a PM can spin teams up per project. portfolio_teardown_team disposes one;
   portfolio_autodispose closes the one-shot lifecycle (a team self-disposes once its
   board drains); portfolio_teams lists the spawned teams.
+
+  A spawned team INHERITS the PM host's model gateway (v0.14) when its template didn't
+  carry one — so portfolio_spinup_team works out of the box on your own gateway, no
+  creds-template prep. Spinup preflights the assembled config and fails loudly if the
+  team couldn't reach a model, rather than booting one that silently ships nothing.
 
 enabled: false
 min_protoagent_version: "0.42.0"
