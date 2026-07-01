@@ -803,7 +803,11 @@ def test_inherit_host_gateway_prefers_resolved_live_config(tmp_path, monkeypatch
 
     # instance yaml has NO gateway (mirrors this box: api_base is a box/host-cascade field)
     _host(tmp_path, monkeypatch, api_base="")
-    monkeypatch.setattr(rs, "STATE", types.SimpleNamespace(graph_config=types.SimpleNamespace(api_base="https://resolved/v1", api_key="")))
+    monkeypatch.setattr(
+        rs,
+        "STATE",
+        types.SimpleNamespace(graph_config=types.SimpleNamespace(api_base="https://resolved/v1", api_key="")),
+    )
     cfg = _team_cfg(tmp_path, "model:\n  api_base: ''\n")
     portfolio._inherit_host_gateway(cfg)
     assert yaml.safe_load(cfg.read_text())["model"]["api_base"] == "https://resolved/v1"
