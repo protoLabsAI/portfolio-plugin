@@ -86,8 +86,22 @@ if "graph.config_io" not in sys.modules:
     cio = types.ModuleType("graph.config_io")
     cio.load_yaml_doc = _load_yaml_doc
     cio.save_yaml_doc = _save_yaml_doc
+    # The PM host's own config + secrets paths — the source _inherit_host_gateway pops the
+    # gateway from. Point at a non-existent path by default (no host = no inheritance); the
+    # spinup tests' `fleet` fixture monkeypatches these to a real host config.
+    cio.config_yaml_path = lambda: Path("/nonexistent/langgraph-config.yaml")
+    cio.secrets_yaml_path = lambda: Path("/nonexistent/secrets.yaml")
     sys.modules["graph.config_io"] = cio
     sys.modules["graph"].config_io = cio
+
+
+# ── runtime.state — the live resolved config (_host_gateway reads STATE.graph_config) ──
+if "runtime.state" not in sys.modules:
+    _pkg("runtime")
+    st = types.ModuleType("runtime.state")
+    st.STATE = types.SimpleNamespace(graph_config=None)  # default: no live config → disk fallback
+    sys.modules["runtime.state"] = st
+    sys.modules["runtime"].state = st
 
 
 # ── graph.plugins.installer — where git-installed plugins live ───────────────────

@@ -125,6 +125,18 @@ def fleet(monkeypatch, tmp_path):
     monkeypatch.setattr(portfolio, "_a2a_send", fake_a2a_send)
     state["onboard_sent"] = []
     state["host_plugins"] = str(tmp_path / "host-plugins")
+
+    # A working PM host to inherit the gateway from + a key in the env — so spinup preflight
+    # passes and _inherit_host_gateway has a real source (mirrors a configured PM box).
+    import graph.config_io as _cio
+
+    host_cfg = tmp_path / "host" / "langgraph-config.yaml"
+    host_cfg.parent.mkdir(parents=True, exist_ok=True)
+    host_cfg.write_text("model:\n  provider: openai\n  api_base: https://gw.host/v1\n")
+    monkeypatch.setattr(_cio, "config_yaml_path", lambda: host_cfg)
+    monkeypatch.setattr(_cio, "secrets_yaml_path", lambda: tmp_path / "host" / "secrets.yaml")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-gateway-key")
+    state["host_api_base"] = "https://gw.host/v1"
     return state
 
 
@@ -737,3 +749,140 @@ def test_set_board_db_sets_and_respects_template(tmp_path):
     p.write_text("project_board:\n  db_path: /mine.db\n")
     portfolio._set_board_db(p, "/scoped/board.db")
     assert yaml.safe_load(p.read_text())["project_board"]["db_path"] == "/mine.db"
+
+
+# ── gateway inheritance (#1 — the spinup creds gotcha) + preflight (#2) ───────────
+
+
+def _host(tmp_path, monkeypatch, *, api_base="https://gw.host/v1", api_key="", secrets=""):
+    """Stand up a fake PM host config (+optional on-disk key/secrets) as the inheritance source."""
+    import graph.config_io as cio
+
+    hc = tmp_path / "host" / "langgraph-config.yaml"
+    hc.parent.mkdir(parents=True, exist_ok=True)
+    model = f"model:\n  provider: openai\n  api_base: {api_base}\n"
+    if api_key:
+        model += f"  api_key: {api_key}\n"
+    hc.write_text(model)
+    hs = tmp_path / "host" / "secrets.yaml"
+    if secrets:
+        hs.write_text(secrets)
+    monkeypatch.setattr(cio, "config_yaml_path", lambda: hc)
+    monkeypatch.setattr(cio, "secrets_yaml_path", lambda: hs)
+    return hc, hs
+
+
+def _team_cfg(tmp_path, body):
+    d = tmp_path / "ws"
+    d.mkdir(exist_ok=True)
+    p = d / "langgraph-config.yaml"
+    p.write_text(body)
+    return p
+
+
+def test_inherit_host_gateway_fills_api_base_when_template_blank(tmp_path, monkeypatch):
+    import yaml
+
+    _host(tmp_path, monkeypatch, api_base="https://gw.host/v1")
+    cfg = _team_cfg(tmp_path, "model:\n  provider: openai\n  name: protolabs/reasoning\n  api_base: ''\n")
+    portfolio._inherit_host_gateway(cfg)
+    m = yaml.safe_load(cfg.read_text())["model"]
+    assert m["api_base"] == "https://gw.host/v1"
+    assert m["name"] == "protolabs/reasoning"  # the team's brain is preserved — only the gateway is filled
+
+
+def test_inherit_host_gateway_prefers_resolved_live_config(tmp_path, monkeypatch):
+    """The RESOLVED live config (STATE.graph_config) is the source of truth — so a gateway
+    that lives in the box-tier host-config.yaml (empty in the instance yaml) is still
+    inherited. Regression for the layer the live round-trip surfaced."""
+    import types
+
+    import yaml
+
+    import runtime.state as rs
+
+    # instance yaml has NO gateway (mirrors this box: api_base is a box/host-cascade field)
+    _host(tmp_path, monkeypatch, api_base="")
+    monkeypatch.setattr(
+        rs,
+        "STATE",
+        types.SimpleNamespace(graph_config=types.SimpleNamespace(api_base="https://resolved/v1", api_key="")),
+    )
+    cfg = _team_cfg(tmp_path, "model:\n  api_base: ''\n")
+    portfolio._inherit_host_gateway(cfg)
+    assert yaml.safe_load(cfg.read_text())["model"]["api_base"] == "https://resolved/v1"
+
+
+def test_inherit_host_gateway_respects_template_gateway(tmp_path, monkeypatch):
+    import yaml
+
+    _host(tmp_path, monkeypatch, api_base="https://gw.host/v1")
+    cfg = _team_cfg(tmp_path, "model:\n  api_base: https://team.gw/v1\n")  # per-team gateway
+    portfolio._inherit_host_gateway(cfg)
+    assert yaml.safe_load(cfg.read_text())["model"]["api_base"] == "https://team.gw/v1"  # untouched
+
+
+def test_inherit_host_gateway_copies_host_secrets_when_team_has_none(tmp_path, monkeypatch):
+    _host(tmp_path, monkeypatch, api_base="https://gw.host/v1", secrets="OPENAI_API_KEY: sk-host\n")
+    cfg = _team_cfg(tmp_path, "model:\n  api_base: ''\n")
+    (cfg.parent / "secrets.yaml").write_text("# Per-workspace secrets overlay.\n")  # placeholder, comment-only
+    portfolio._inherit_host_gateway(cfg)
+    assert (cfg.parent / "secrets.yaml").read_text() == "OPENAI_API_KEY: sk-host\n"  # host key carried over
+
+
+def test_inherit_host_gateway_noop_when_host_has_no_base(tmp_path, monkeypatch):
+    import yaml
+
+    _host(tmp_path, monkeypatch, api_base="")  # host itself has no on-disk base
+    cfg = _team_cfg(tmp_path, "model:\n  api_base: ''\n")
+    portfolio._inherit_host_gateway(cfg)
+    assert (yaml.safe_load(cfg.read_text())["model"].get("api_base") or "") == ""  # nothing to inherit
+
+
+def test_preflight_passes_with_gateway(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    cfg = _team_cfg(tmp_path, "model:\n  api_base: https://gw/v1\n")
+    assert portfolio._preflight_team(cfg) == ""
+
+
+def test_preflight_fails_without_api_base(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    cfg = _team_cfg(tmp_path, "model:\n  api_base: ''\n")
+    assert "no model gateway" in portfolio._preflight_team(cfg)
+
+
+def test_preflight_fails_without_any_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cfg = _team_cfg(tmp_path, "model:\n  api_base: https://gw/v1\n")  # base but no key anywhere
+    assert "no model gateway key" in portfolio._preflight_team(cfg)
+
+
+@pytest.mark.asyncio
+async def test_spinup_inherits_gateway_from_shipped_template(fleet, tmp_path):
+    """THE GOTCHA FIX end-to-end: spinup with NO creds prep (shipped example, api_base='')
+    boots a team that inherited the PM host's gateway — not a dead one."""
+    import yaml
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = json.loads(await _tool("portfolio_spinup_team").ainvoke({"name": "gw", "repo": str(repo)}))
+    assert out["team"] == "gw" and out["ready"] is True
+    doc = yaml.safe_load((tmp_path / "ws" / "gw" / "langgraph-config.yaml").read_text())
+    assert doc["model"]["api_base"] == fleet["host_api_base"]  # inherited the PM's gateway
+    assert doc["model"]["name"] == "protolabs/reasoning"  # shipped template's brain kept
+
+
+@pytest.mark.asyncio
+async def test_spinup_preflight_rejects_a_credless_team(fleet, template, tmp_path, monkeypatch):
+    """No host gateway to inherit AND no env key → spinup fails loudly + rolls back, rather
+    than booting a team that silently can't think."""
+    import graph.config_io as cio
+
+    monkeypatch.setattr(cio, "config_yaml_path", lambda: tmp_path / "nope" / "langgraph-config.yaml")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = await _tool("portfolio_spinup_team").ainvoke({"name": "bad", "repo": str(repo), "template": str(template)})
+    assert "preflight failed" in out and "no model gateway" in out
+    assert portfolio._team_by_name("bad") is None  # never recorded
+    assert "bad-abcd" in fleet["removed"]  # workspace rolled back

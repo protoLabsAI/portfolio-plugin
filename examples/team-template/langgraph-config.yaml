@@ -9,10 +9,14 @@
 #     {{TEAM_NAME}}  → the team / board name (the `name` arg)
 #     {{GATE}}       → the pre-PR gate command (the `gate` arg; empty = no gate)
 #
-# A sibling secrets.yaml (gateway api_key + any delegate tokens) is cloned alongside —
-# copy secrets.example.yaml → secrets.yaml here and fill it in. The team's plugins
-# (project_board + delegates) come from the bundle the host already has installed, or
-# install them into the template dir's plugins/ first.
+# GATEWAY (v0.14+): leave `model.api_base` blank and portfolio_spinup_team fills it from
+# the PM host's own resolved gateway — so a team inherits the PM's model with NO creds prep.
+# Only set api_base / drop a secrets.yaml here if you want this team on a DIFFERENT gateway
+# than the PM's. (The gateway key rides the PM's environment into the spawned team, so an
+# env-only OPENAI_API_KEY reaches it too.) A sibling secrets.yaml — if present — is cloned
+# alongside (copy secrets.example.yaml → secrets.yaml and fill it) for that per-team case.
+# The team's plugins (project_board + delegates) come from the bundle the host already has
+# installed, or install them into the template dir's plugins/ first.
 
 identity:
   name: "{{TEAM_NAME}}"
@@ -20,8 +24,8 @@ identity:
 model:
   provider: openai
   name: protolabs/reasoning
-  api_base: ""        # your gateway / OpenAI-compat base URL (or carry it in secrets.yaml)
-  api_key: ""         # falls back to OPENAI_API_KEY in this template's secrets.yaml
+  api_base: ""        # blank → INHERITS the PM host's gateway (set only for a per-team gateway)
+  api_key: ""         # blank → the PM's OPENAI_API_KEY reaches the team via its environment
   temperature: 0.2
 
 # Brain: `native` runs on the gateway model above. Switch to `acp:claude` (with the
