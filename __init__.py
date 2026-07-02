@@ -161,15 +161,29 @@ def _parse_boards(boards: str) -> set | None:
     return {b.strip() for b in boards.split(",") if b.strip()} if boards else None
 
 
+def _store_path(name: str) -> Path:
+    """A per-instance path for a PM data file, so co-located instances don't collide
+    (ADR 0004) — mirroring the fleet's remotes.json.
+
+    Hosts on the two-tier path model (protoAgent >= 0.77, #1481) resolve via
+    ``instance_paths().store()``; older hosts still ship the legacy ``scope_leaf``
+    knob, so fall back to it rather than bumping min_protoagent_version."""
+    try:
+        from infra.paths import instance_paths
+
+        return instance_paths().store(name)
+    except ImportError:
+        from infra.paths import data_home, scope_leaf
+
+        return scope_leaf(data_home() / name)
+
+
 # ── P2 deltas: snapshot + diff (pull-diff, PM-side) ──────────────────────────────
 
 
 def _snapshot_path():
-    """Per-instance baseline for delta detection — scoped under the PM's data root so
-    co-located instances don't collide (ADR 0004), mirroring remotes.json."""
-    from infra.paths import data_home, scope_leaf
-
-    return scope_leaf(data_home() / "portfolio_snapshot.json")
+    """Per-instance baseline for delta detection — mirrors remotes.json."""
+    return _store_path("portfolio_snapshot.json")
 
 
 def _load_snapshot() -> dict:
@@ -297,9 +311,7 @@ def _links_path():
     """Cross-board dependency edges, scoped under the PM's data root (ADR 0004) —
     mirrors the P2 snapshot + fleet remotes.json. Edges are PM state: a team-agent
     doesn't know its dependents, and the sequencing is the PM's concern."""
-    from infra.paths import data_home, scope_leaf
-
-    return scope_leaf(data_home() / "portfolio_links.json")
+    return _store_path("portfolio_links.json")
 
 
 def _load_links() -> list:
@@ -479,9 +491,7 @@ def _teams_path():
     mirroring portfolio_links.json / portfolio_snapshot.json. It's how teardown +
     autodispose tell a portfolio-spawned ephemeral team from a hand-registered remote
     (which must never be auto-disposed)."""
-    from infra.paths import data_home, scope_leaf
-
-    return scope_leaf(data_home() / "portfolio_teams.json")
+    return _store_path("portfolio_teams.json")
 
 
 def _load_teams() -> list:

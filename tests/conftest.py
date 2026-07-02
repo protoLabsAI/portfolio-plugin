@@ -148,9 +148,19 @@ if "infra.paths" not in sys.modules:
     def _atomic_write(path, text, *, mode=None):
         Path(path).write_text(text)
 
+    class _InstancePaths:
+        """The two-tier resolver (protoAgent >= 0.77, #1481) — store() only, which is
+        all the plugin uses. Legacy scope_leaf/data_home stay for the fallback branch."""
+
+        instance_root = Path("/tmp")
+
+        def store(self, name):
+            return self.instance_root / name
+
     paths = types.ModuleType("infra.paths")
     paths.data_home = lambda: Path("/tmp")
     paths.scope_leaf = lambda p: Path(p)
+    paths.instance_paths = lambda: _InstancePaths()
     paths.atomic_write = _atomic_write
     sys.modules["infra.paths"] = paths
     sys.modules["infra"].paths = paths
