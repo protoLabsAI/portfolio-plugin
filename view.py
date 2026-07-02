@@ -120,7 +120,15 @@ VIEW_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 let kit;
 try { kit = await import(BASE + "/_ds/plugin-kit.js"); }
 catch (e) { kit = { initPluginView(){}, apiFetch: (p, i) => fetch(BASE + p, i) }; }
-const api = (p) => kit.apiFetch(p).then(r => r.json());
+// Errors become READABLE: a JSON error body surfaces its `detail`/`error` message, a
+// non-JSON body its HTTP status (a fleet-proxy hiccup, a restarting member) — never a
+// raw parse error like WebKit's "The string did not match the expected pattern".
+const api = async (p, init) => {
+  const r = await kit.apiFetch(p, init);
+  const d = await r.json().catch(() => { throw new Error("HTTP " + r.status + " (non-JSON response)"); });
+  if (!r.ok) throw new Error((d && (d.detail || d.error)) || "HTTP " + r.status);
+  return d;
+};
 
 const LANES = [["backlog","backlog"],["ready","ready"],["in_progress","prog"],["in_review","review"],["done","done"]];
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -247,12 +255,11 @@ async function openSpawn(){
     if (!archetype && !f.repo.value.trim()){ res.innerHTML = `<div class="err">Pick a prebuilt repo or enter a repo path.</div>`; return; }
     go.disabled = true; go.textContent = "Spinning up…"; res.innerHTML = `<div class="sub">freshening + starting the team…</div>`;
     try {
-      const r = await kit.apiFetch("/api/plugins/portfolio/spinup", {
+      const d = await api("/api/plugins/portfolio/spinup", {
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({ name: f.name.value.trim(), repo: f.repo.value.trim(), archetype,
           gate: f.gate.value.trim(), onboard: f.onboard.checked, auto_dispose: f.auto_dispose.checked })
       });
-      const d = await r.json();
       if (d && d.error){ res.innerHTML = `<div class="err">${esc(d.error)}</div>`; go.disabled=false; go.textContent="Spin up"; return; }
       closeDrawer(); tab = "boards";
       document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on", x.dataset.tab==="boards"));
