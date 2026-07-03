@@ -35,6 +35,8 @@ VIEW_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     border-radius:var(--pl-radius-md,8px);padding:var(--pl-space-3,12px) var(--pl-space-4,16px);cursor:pointer}
   .card:hover{border-color:var(--pl-color-accent,#6cb6ff)} .card.dim{opacity:.55;cursor:default}
   .card.dim:hover{border-color:var(--pl-color-border,#272b33)}
+  .rm{cursor:pointer;color:var(--pl-color-fg-muted,#8a8f98);font-size:14px;line-height:1;padding:0 2px;flex:0 0 auto}
+  .rm:hover{color:var(--pl-color-danger,#f85149)}
   .chead{display:flex;align-items:center;gap:8px;margin-bottom:6px}
   .name{font-weight:600;font-size:14px} .grow{flex:1}
   .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--pl-color-fg-muted,#8a8f98)}
@@ -143,11 +145,15 @@ function card(b){
   const drained = b.drained ? `<span class="pill drn">drained</span>`
     : reach ? `<span class="pill">${(b.total||0)-(counts.done||0)} active</span>` : "";
   const blk = blocked ? `<span class="pill blk">${blocked} blocked</span> ` : "";
+  // An unreachable card gets a Remove (✕) to clear a dead board from the portfolio
+  // without a reload or the CLI (#23) — the whole point of an ephemeral team is to be
+  // disposable, and a host restart can leave one stranded past teardown's reach.
+  const rm = reach ? "" : `<span class="rm" data-forget="${esc(b.board)}" title="Remove this board from the portfolio">✕</span>`;
   const body = reach
     ? `<div class="lanes">${lanes}</div><div class="foot"><span>${blk}${drained}</span><span class="a2a">${esc(b.a2a||"")}</span></div>`
     : `<div class="err">${esc(b.error||"unreachable")}</div>`;
   return `<div class="card ${reach?"":"dim"}" ${reach?`data-board="${esc(b.board)}"`:""}>
-    <div class="chead"><span class="dot ${reach?"up":"down"}"></span><span class="name">${esc(b.board)}</span><span class="grow"></span>${badge}</div>
+    <div class="chead"><span class="dot ${reach?"up":"down"}"></span><span class="name">${esc(b.board)}</span><span class="grow"></span>${badge}${rm}</div>
     ${b.repo ? `<div class="repo">${esc(b.repo)}</div>` : ""}${body}</div>`;
 }
 
@@ -222,7 +228,18 @@ async function openBoard(name){
 }
 function closeDrawer(){ document.getElementById("scrim").classList.remove("on"); document.getElementById("drawer").classList.remove("on"); }
 document.getElementById("scrim").onclick = closeDrawer;
-document.getElementById("boards").addEventListener("click", e=>{
+document.getElementById("boards").addEventListener("click", async e=>{
+  const rm = e.target.closest("[data-forget]");
+  if (rm){
+    e.stopPropagation();
+    const name = rm.getAttribute("data-forget");
+    if (!confirm(`Remove board "${name}" from the portfolio? For an ephemeral team this tears it down; the managed repo is untouched.`)) return;
+    rm.textContent = "…";
+    try { await api("/api/plugins/portfolio/forget", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ board: name }) }); }
+    catch(err){ rm.textContent = "✕"; document.getElementById("err").hidden = false; document.getElementById("err").textContent = "Could not remove board: " + err; return; }
+    load();
+    return;
+  }
   const c = e.target.closest("[data-board]"); if (c) openBoard(c.getAttribute("data-board"));
 });
 
@@ -426,5 +443,18 @@ def build_data_router(cfg: dict | None = None):
             shared_board=bool(body.get("shared_board", False)),
             cfg=cfg,
         )
+
+    @router.post("/forget")
+    async def _forget(body: dict) -> dict:
+        """Remove a board from the portfolio — the dashboard's ✕ on an unreachable card
+        (#23). Drops it from whatever store backs it (spawned team → teardown; else the
+        fleet remote / local member), so a dead ephemeral board clears without a reload
+        or the CLI. Operator-gated. Idempotent."""
+        from . import _forget_board
+
+        name = (body.get("board") or body.get("name") or "").strip()
+        if not name:
+            return {"error": "a board name is required"}
+        return await asyncio.to_thread(_forget_board, name)
 
     return router

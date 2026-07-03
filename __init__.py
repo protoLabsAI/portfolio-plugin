@@ -891,6 +891,60 @@ def _dispose(team: dict) -> dict:
     return out
 
 
+def _forget_board(name: str) -> dict:
+    """Clear a board from the portfolio, whatever store backs it (#23) — the general
+    'remove a dead board' the dashboard offers, which teardown can't cover.
+
+    A dead ephemeral team after a host restart is often gone from the spawned-teams
+    registry (so ``portfolio_teardown_team`` refuses) yet still lingers as a fleet
+    member, showing an unreachable card the operator can't clear. Resolve by store,
+    idempotently: a portfolio-spawned team gets the full ``_dispose``; otherwise drop
+    the fleet REMOTE (external) or stop + purge the LOCAL member workspace. Best-effort
+    per step so a partially-gone board still clears."""
+    from graph.fleet import supervisor
+    from graph.workspaces import manager
+
+    name = (name or "").strip()
+    if not name:
+        return {"board": name, "error": "no board name"}
+    # Spawned team → full teardown (stops server, purges workspace, unregisters, forgets).
+    team = _team_by_name(name)
+    if team is not None:
+        return _dispose(team)
+
+    out: dict = {"board": name}
+    dropped = False
+    # A registered remote (external board) → just unregister it.
+    if any(r.get("name") == name or r.get("id") == name for r in supervisor.list_remotes()):
+        try:
+            supervisor.remove_remote(name)
+            out["unregistered"] = dropped = True
+        except Exception as exc:  # noqa: BLE001
+            out["unregister_error"] = str(exc)
+    # A local member (a workspace whose process may be dead) → stop + purge it.
+    for m in supervisor.status():
+        if m.get("host") or m.get("remote"):
+            continue
+        if m.get("name") == name or m.get("id") == name:
+            wid = m.get("id") or name
+            try:
+                supervisor.stop(wid)
+            except Exception:  # noqa: BLE001 — already stopped/unknown is fine
+                pass
+            try:
+                manager.remove(wid, purge=True)
+                out["purged"] = dropped = True
+            except Exception as exc:  # noqa: BLE001
+                out["remove_error"] = str(exc)
+            break
+    _forget_team(name)  # drop any stray registry entry too
+    out["forgotten"] = True
+    if not dropped:
+        # Nothing backing it — already gone server-side (the card was stale client state).
+        out["note"] = "board was not backed by any live fleet record — already cleared server-side"
+    return out
+
+
 def _freshen_repo(repo: str) -> str:
     """Bring the repo up to date with its remote BEFORE a team works on it — ``git fetch``
     + fast-forward the checked-out default branch when it's safe (clean tree, on that
