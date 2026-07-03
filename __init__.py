@@ -671,6 +671,22 @@ def _default_template() -> str:
     return str(p) if (p / "langgraph-config.yaml").exists() else ""
 
 
+def _team_config_path(ws_path: str) -> Path:
+    """The team workspace's ``langgraph-config.yaml`` across host layouts (#21).
+
+    Two-tier hosts (protoAgent >= 0.78, ADR 0065 — ``PROTOAGENT_HOME=<ws>`` makes the
+    workspace the member's instance root) scaffold it at ``<ws>/config/``; pre-two-tier
+    hosts put it at the workspace root. Binding blindly at the root ENOENT'd every
+    spinup on current hosts (the rollback then purged the workspace, so the PM retried
+    into a spiral). Prefer whichever exists; default to the two-tier location."""
+    root = Path(ws_path)
+    nested = root / "config" / "langgraph-config.yaml"
+    if nested.exists():
+        return nested
+    legacy = root / "langgraph-config.yaml"
+    return legacy if legacy.exists() else nested
+
+
 def _ensure_plugins_dir(cfg_path: Path, plugins_dir: str) -> None:
     """Point the cloned config's ``plugins.dir`` at a directory holding the external
     plugins the team enables (project_board / github), so they actually load — a workspace
@@ -1001,7 +1017,7 @@ async def _spinup_team(
     freshness = "n/a (no repo)"
     board_mode = "shared (repo .beads)" if shared_board else "isolated"
     try:
-        cfg_path = Path(ws["path"]) / "langgraph-config.yaml"
+        cfg_path = _team_config_path(ws["path"])
         _apply_team_bindings(cfg_path, repo_abs, name, gate)
         _ensure_plugins_dir(cfg_path, pdir)
         if not shared_board:
