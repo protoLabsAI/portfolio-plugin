@@ -888,23 +888,44 @@ def _inherit_host_gateway(cfg_path: Path) -> None:
     and a template that already set its own ``api_base`` (a per-team gateway) is left alone.
     (The key ALSO rides ``os.environ`` into the child via supervisor.start, so an env-only key
     still reaches the team; this carries the ``api_base``, which has no env fallback in
-    graph.llm.) Best-effort + comment-preserving (ruamel)."""
+    graph.llm.)
+
+    Also gap-fills any ``delegates:`` entry of ``type: openai`` with a blank ``url`` (e.g. the
+    shipped template's ``fusion`` delegate, ADR 0064 P3) — same discipline, same host gateway,
+    so an ``openai``-type delegate needs no per-team creds prep either. A delegate that already
+    sets its own ``url`` (a per-delegate gateway) is left alone, same as the model block.
+
+    Best-effort + comment-preserving (ruamel)."""
     from graph.config_io import load_yaml_doc, save_yaml_doc, secrets_yaml_path
 
     doc = load_yaml_doc(cfg_path)
     if not isinstance(doc, dict):
         return
-    model = doc.setdefault("model", {})
-    if not isinstance(model, dict) or str(model.get("api_base") or "").strip():
-        return  # the template carries its own gateway — respect it (per-team gateway)
 
     host_base, host_key = _host_gateway()
-    if not host_base:
-        return  # host itself has no resolvable gateway — nothing to inherit (preflight will flag)
-    model["api_base"] = host_base
-    if host_key and not str(model.get("api_key") or "").strip():
-        model["api_key"] = host_key
-    save_yaml_doc(doc, cfg_path)
+    changed = False
+
+    model = doc.setdefault("model", {})
+    if isinstance(model, dict) and not str(model.get("api_base") or "").strip() and host_base:
+        model["api_base"] = host_base
+        if host_key and not str(model.get("api_key") or "").strip():
+            model["api_key"] = host_key
+        changed = True
+
+    delegates = doc.get("delegates")
+    if isinstance(delegates, list) and host_base:
+        for d in delegates:
+            if not isinstance(d, dict) or str(d.get("type") or "") != "openai":
+                continue
+            if str(d.get("url") or "").strip():
+                continue  # a per-delegate gateway is already set — respect it
+            d["url"] = host_base
+            if host_key and not str(d.get("api_key") or "").strip():
+                d["api_key"] = host_key
+            changed = True
+
+    if changed:
+        save_yaml_doc(doc, cfg_path)
 
     # Carry the host's secrets overlay (the gateway key) onto the team when it has none of its
     # own — belt-and-suspenders with the env-inherited key. Never clobber a real team secrets.

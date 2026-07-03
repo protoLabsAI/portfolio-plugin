@@ -44,6 +44,11 @@ delegates:
   # args, unlike proto) — the same binary a Claude-brained team already runs, so it's
   # on PATH for free. Needs `npm i -g @agentclientprotocol/claude-agent-acp` otherwise.
   - { name: claude, type: acp, command: claude-code, workdir: "{{REPO}}", permissions: auto }
+  # fusion (ADR 0064 P3) — the coder ladder's rung 4, an `openai`-type delegate (a plain
+  # completion, NOT an ACP session — fusion can't tool-call). `url`/`api_key` blank →
+  # INHERITS the same host gateway the team's own `model:` block does (portfolio_spinup_team
+  # gap-fills any blank-url openai delegate here, same discipline as the brain model above).
+  - { name: fusion, type: openai, model: protolabs/fusion, url: "", api_key: "" }
 
 project_board:
   repo: "{{REPO}}"            # the repo the board manages; worktrees branch off it
@@ -60,14 +65,22 @@ project_board:
     opus: claude
   loop_enabled: true          # auto-dispatch ready features (an ephemeral team should just run)
   local_gate_cmd: "{{GATE}}"  # pre-PR gate — the repo's real check command (empty = none)
+  # rung 4 (ADR 0064 P3): reached only after greedy AND best-of-k AND tree-search all
+  # fail a feature's acceptance tests — a richer generator for the hardest work. fusion
+  # can't tool-call (a plain completion), so the board seam hands it the current file
+  # content itself and writes its reply's files into a fresh worktree for the SAME
+  # verify() to judge — no separate LLM judge. Blank delegate = ladder stops at tree-search.
+  coder_solve_fusion_delegate: fusion
+  coder_solve_fusion_k: 2
 
 # coder (ADR 0064) — the execution-grounded escalation: when a feature's EARS acceptance
 # compiles to tests and the coders above still can't pass them, the board can search
 # HARDER on a FIXED model — greedy → best-of-k → tree-search (refine on the failing
-# tests) — gated on the tests actually passing, not an LLM judge. This is a different
-# axis than the coders ladder above (which climbs model tier); the two compose. It runs
-# MODEL-AUTHORED CODE in a subprocess (isolation, NOT a true sandbox, like execute_code)
-# — enable only for a trusted model/host.
+# tests) → fusion (a richer, oracle-selected generator for what even tree-search
+# couldn't pass) — gated on the tests actually passing, not an LLM judge. This is a
+# different axis than the coders ladder above (which climbs model tier); the two
+# compose. It runs MODEL-AUTHORED CODE in a subprocess (isolation, NOT a true sandbox,
+# like execute_code) — enable only for a trusted model/host.
 coder:
   delegate: proto   # candidate generator for the search ladder (reuse a delegate declared above)
 

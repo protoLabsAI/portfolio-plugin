@@ -190,14 +190,36 @@ Where `project_board.coders` escalates by **model tier**, the `coder` plugin esc
 criteria compile to tests and the coders above still can't pass them, the board can reach
 for `coder`'s difficulty-gated ladder: **greedy** (one shot) → **best-of-k** (k candidates,
 execution-selected) → **tree-search** (refine on the *failing* tests, bounded depth) →
-**fusion** (opt-in, richest generator). Every rung is gated on tests actually passing, never
-an LLM judge — it's the missing execution-verification rung in the board loop, reserved for
-genuinely **hard, verifiable** features the cheaper coders above failed.
+**fusion** (opt-in, richest generator, wired via `project_board.coder_solve_fusion_delegate`
+below). Every rung is gated on tests actually passing, never an LLM judge — it's the missing
+execution-verification rung in the board loop, reserved for genuinely **hard, verifiable**
+features the cheaper coders above failed.
 
 `coder` runs **model-authored code in a subprocess** — isolation, **not** a true sandbox
 (the same caveat as `execute_code`) — so only enable it for a trusted model/host. See
 [ADR 0064](https://github.com/protoLabsAI/protoAgent/blob/main/docs/adr/0064-coder-execution-grounded-code-solve.md)
 for the full ladder, the verifier contract, and the board-seam design.
+
+#### `fusion` — rung 4, a richer generator that can't tool-call
+
+```yaml
+delegates:
+  - { name: fusion, type: openai, model: protolabs/fusion, url: "", api_key: "" }
+project_board:
+  coder_solve_fusion_delegate: fusion
+  coder_solve_fusion_k: 2
+```
+
+Reached only after greedy **and** best-of-k **and** tree-search all fail a feature's
+acceptance tests. Fusion is a plain chat completion, not an ACP coding session — it **can't
+tool-call**, so it can't read the repo or edit files itself. The board seam works around this:
+it hands fusion the CURRENT content of the feature's declared `files_to_modify`, asks for the
+complete replacement content of every file it changes, and writes the reply's files into a
+fresh worktree for the same acceptance-test oracle to judge — no separate LLM judge, ever.
+`url`/`api_key` blank on the `fusion` delegate → gap-filled from the same host gateway the
+team's own brain model inherits (no per-team creds prep). Blank
+`coder_solve_fusion_delegate` (an empty string, not the shipped default) → the ladder simply
+stops at tree-search.
 
 ### `filesystem` — fenced to the repo
 
