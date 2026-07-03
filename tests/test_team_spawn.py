@@ -65,11 +65,15 @@ def fleet(monkeypatch, tmp_path):
     state: dict = {"remotes": {}, "workspaces": {}, "running": set(), "started": [], "stopped": [], "removed": []}
 
     def fake_create(name, *, from_config=None, port=None, **k):
+        # Mirror the REAL host's two-tier layout (protoAgent >= 0.78, ADR 0065):
+        # the member config scaffolds at <ws>/config/langgraph-config.yaml. The old
+        # fake copied to the workspace ROOT — modeling the pre-two-tier host — which
+        # is exactly why the suite never caught the every-spinup ENOENT (#21).
         ws = tmp_path / "ws" / name
-        ws.mkdir(parents=True)
+        (ws / "config").mkdir(parents=True)
         src = Path(from_config)
         src = src if src.is_file() else src / "langgraph-config.yaml"
-        shutil.copyfile(src, ws / "langgraph-config.yaml")
+        shutil.copyfile(src, ws / "config" / "langgraph-config.yaml")
         rec = {"id": f"{name}-abcd", "name": name, "port": port or 7874, "path": str(ws)}
         state["workspaces"][rec["id"]] = rec
         return rec
@@ -169,7 +173,7 @@ async def test_spinup_clones_binds_starts_registers(fleet, template, tmp_path):
     # repo-prep excluded the coder's per-session .proto scratch (so its PRs ship clean)
     assert ".proto/memory/" in (repo / ".git" / "info" / "exclude").read_text()
     # the repo was BOUND into the cloned config — every sentinel filled
-    bound = (tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text()
+    bound = (tmp_path / "ws" / "alpha" / "config" / "langgraph-config.yaml").read_text()
     assert "{{" not in bound
     assert out["repo"] in bound and "name: alpha" in bound and "ruff check ." in bound
     # the team was sent a one-time onboarding instruction (over A2A) + summary surfaced
@@ -188,7 +192,7 @@ async def test_spinup_auto_detects_the_gate(fleet, template, tmp_path):
         await _tool("portfolio_spinup_team").ainvoke({"name": "alpha", "repo": str(repo), "template": str(template)})
     )
     assert out["gate"] == "ruff check . && ruff format --check ."
-    bound = (tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text()
+    bound = (tmp_path / "ws" / "alpha" / "config" / "langgraph-config.yaml").read_text()
     assert "ruff check . && ruff format --check ." in bound
 
 
@@ -248,7 +252,7 @@ async def test_spinup_defaults_plugins_dir_to_host(fleet, template, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     await _tool("portfolio_spinup_team").ainvoke({"name": "alpha", "repo": str(repo), "template": str(template)})
-    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text())
+    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "config" / "langgraph-config.yaml").read_text())
     assert doc["plugins"]["dir"] == fleet["host_plugins"]
 
 
@@ -261,7 +265,7 @@ async def test_spinup_honors_explicit_plugins_dir(fleet, template, tmp_path):
     await _tool("portfolio_spinup_team").ainvoke(
         {"name": "alpha", "repo": str(repo), "template": str(template), "plugins_dir": "/custom/plugins"}
     )
-    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text())
+    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "config" / "langgraph-config.yaml").read_text())
     assert doc["plugins"]["dir"] == "/custom/plugins"
 
 
@@ -674,7 +678,7 @@ async def test_spinup_archetype_fills_repo_and_gate(fleet, template, tmp_path):
     }
     out = json.loads(await _tool("portfolio_spinup_team", cfg).ainvoke({"name": "pc1", "archetype": "protocontent"}))
     assert out["team"] == "pc1" and out["repo"] == str(repo) and out["gate"] == "pnpm -r build"
-    bound = (tmp_path / "ws" / "pc1" / "langgraph-config.yaml").read_text()
+    bound = (tmp_path / "ws" / "pc1" / "config" / "langgraph-config.yaml").read_text()
     assert str(repo) in bound and "pnpm -r build" in bound
 
 
@@ -710,7 +714,7 @@ async def test_spinup_isolates_the_board_by_default(fleet, template, tmp_path, m
         await _tool("portfolio_spinup_team").ainvoke({"name": "alpha", "repo": str(repo), "template": str(template)})
     )
     assert out["board"] == "isolated"
-    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text())
+    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "config" / "langgraph-config.yaml").read_text())
     # scoped, under a .beads/ dir (beads requires it), NOT the repo's .beads
     assert doc["project_board"]["db_path"].endswith("/.beads/board.db")
     assert (tmp_path / "ws" / "alpha" / ".beads").is_dir()  # the dir was created
@@ -733,7 +737,7 @@ async def test_spinup_shared_board_uses_the_repo_beads(fleet, template, tmp_path
         )
     )
     assert out["board"] == "shared (repo .beads)"
-    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "langgraph-config.yaml").read_text())
+    doc = yaml.safe_load((tmp_path / "ws" / "alpha" / "config" / "langgraph-config.yaml").read_text())
     assert "db_path" not in (doc.get("project_board") or {})  # uses the repo's .beads
     assert inits == [out["repo"]]  # repo `br init` ran
 
@@ -867,7 +871,7 @@ async def test_spinup_inherits_gateway_from_shipped_template(fleet, tmp_path):
     repo.mkdir()
     out = json.loads(await _tool("portfolio_spinup_team").ainvoke({"name": "gw", "repo": str(repo)}))
     assert out["team"] == "gw" and out["ready"] is True
-    doc = yaml.safe_load((tmp_path / "ws" / "gw" / "langgraph-config.yaml").read_text())
+    doc = yaml.safe_load((tmp_path / "ws" / "gw" / "config" / "langgraph-config.yaml").read_text())
     assert doc["model"]["api_base"] == fleet["host_api_base"]  # inherited the PM's gateway
     assert doc["model"]["name"] == "protolabs/reasoning"  # shipped template's brain kept
 
@@ -915,3 +919,33 @@ async def test_spinup_no_warning_when_br_present(fleet, template, tmp_path, monk
         await _tool("portfolio_spinup_team").ainvoke({"name": "hasbr", "repo": str(repo), "template": str(template)})
     )
     assert "warning" not in out
+
+
+@pytest.mark.asyncio
+async def test_spinup_binds_on_a_legacy_root_layout_host(fleet, template, tmp_path, monkeypatch):
+    """Pre-two-tier hosts (< protoAgent 0.78) put the workspace config at the ROOT, not
+    under <ws>/config/ — _team_config_path must keep those working (#21)."""
+    from graph.workspaces import manager
+
+    def legacy_create(name, *, from_config=None, port=None, **k):
+        ws = tmp_path / "ws" / name
+        ws.mkdir(parents=True)
+        src = Path(from_config)
+        src = src if src.is_file() else src / "langgraph-config.yaml"
+        shutil.copyfile(src, ws / "langgraph-config.yaml")
+        rec = {"id": f"{name}-abcd", "name": name, "port": port or 7874, "path": str(ws)}
+        fleet["workspaces"][rec["id"]] = rec
+        return rec
+
+    monkeypatch.setattr(manager, "create", legacy_create)
+    repo = tmp_path / "repo-legacy"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    out = json.loads(
+        await _tool("portfolio_spinup_team").ainvoke(
+            {"name": "legacy", "repo": str(repo), "template": str(template), "gate": "true"}
+        )
+    )
+    assert out.get("team") == "legacy", out
+    bound = (tmp_path / "ws" / "legacy" / "langgraph-config.yaml").read_text()
+    assert "{{REPO}}" not in bound and str(repo) in bound
