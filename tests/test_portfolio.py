@@ -208,8 +208,8 @@ async def test_rollup_projects_bounded_counts_and_only_blocked_critical(monkeypa
     boards = {
         "team-web": [
             {"id": "w1", "title": "ready feat", "board_state": "ready"},
-            {"id": "w2", "title": "blocked feat", "board_state": "in_progress", "blocked": True},
-            {"id": "w3", "title": "foundation", "board_state": "in_progress", "foundation": True},
+            {"id": "w2", "title": "blocked feat", "board_state": "in_progress", "blocked": True, "priority": 1},
+            {"id": "w3", "title": "foundation", "board_state": "in_progress", "foundation": True, "priority": 2},
             {"id": "w4", "title": "done foundation", "board_state": "done", "foundation": True},
         ],
         "team-api": [{"id": "a1", "title": "x", "board_state": "backlog"}],
@@ -224,13 +224,87 @@ async def test_rollup_projects_bounded_counts_and_only_blocked_critical(monkeypa
     web = out["team-web"]
     assert web["total"] == 4
     assert web["counts"] == {"ready": 1, "in_progress": 2, "done": 1}
-    assert web["blocked"] == [{"id": "w2", "title": "blocked feat"}]  # only the blocked one
+    assert web["blocked"] == [{"id": "w2", "title": "blocked feat", "priority": 1}]  # only the blocked one
     assert web["critical_path"] == [
-        {"id": "w3", "title": "foundation", "state": "in_progress"}
-    ]  # done foundation excluded
+        {"id": "w3", "title": "foundation", "state": "in_progress", "priority": 2}
+    ]  # done foundation excluded, priority present
     # the rollup is BOUNDED — it carries counts + blocked/critical only, never the full feature list
     assert "spec" not in json.dumps(web) and "files_to_modify" not in json.dumps(web)
     assert out["team-api"]["counts"] == {"backlog": 1}
+
+
+@pytest.mark.asyncio
+async def test_rollup_priority_and_stuck(monkeypatch):
+    """Priority on every blocked/critical entry, P0-first sort, stuck threshold,
+    terminal exclusion, empty board. (ADR 0055 P2 — the rollup surfaces WHICH items
+    matter, not just counts.)"""
+    from graph.fleet import supervisor
+    import portfolio as pf
+
+    monkeypatch.setattr(
+        supervisor,
+        "list_remotes",
+        lambda: [{"id": "r1", "name": "board", "url": "https://b.example", "token": "t"}],
+    )
+
+    boards = {
+        "board": [
+            # P1 blocked — should come AFTER P0 in the sorted blocked list
+            {"id": "b2", "title": "P1 blocked", "board_state": "in_progress", "blocked": True, "priority": 1},
+            # P0 blocked — should come FIRST in the sorted blocked list
+            {"id": "b1", "title": "P0 blocked", "board_state": "in_progress", "blocked": True, "priority": 0},
+            # Same priority, different id — id breaks the tie
+            {"id": "b3", "title": "P0 other", "board_state": "in_progress", "blocked": True, "priority": 0},
+            # 1 attempt — NOT stuck (threshold is >= 2)
+            {"id": "s1", "title": "one bounce", "board_state": "in_review", "attempts": [1]},
+            # 2 attempts — stuck
+            {"id": "s2", "title": "two bounces", "board_state": "in_review", "attempts": [1, 2], "priority": 1},
+            # 3 attempts — stuck, highest-attempts-first
+            {"id": "s3", "title": "three bounces", "board_state": "in_progress", "attempts": [1, 2, 3], "priority": 0},
+            # done — must NOT appear in blocked / critical / stuck
+            {"id": "d1", "title": "done blocked", "board_state": "done", "blocked": True, "priority": 0},
+            # cancelled — must NOT appear in blocked / critical / stuck
+            {"id": "d2", "title": "cancelled stuck", "board_state": "cancelled", "attempts": [1, 2]},
+            # done foundation — must NOT appear in critical
+            {"id": "d3", "title": "done found", "board_state": "done", "foundation": True},
+        ],
+    }
+
+    async def fake_fetch(rec, state=""):
+        return boards[rec["name"]]
+
+    monkeypatch.setattr(pf, "_fetch_board_features", fake_fetch)
+
+    out = json.loads(await _tool("portfolio_rollup").ainvoke({}))[0]
+
+    # Priority present on every blocked and critical_path entry
+    for item in out["blocked"]:
+        assert "priority" in item
+    # P0-first sort: b1 (P0, id=b1) < b3 (P0, id=b3) < b2 (P1)
+    assert [it["id"] for it in out["blocked"]] == ["b1", "b3", "b2"]
+    # Terminal features excluded from blocked
+    assert all(it["id"] not in {"d1", "d2", "d3"} for it in out["blocked"])
+
+    # Stuck: s3 (3 attempts) first, then s2 (2 attempts); sorted attempts-desc, priority asc
+    assert [it["id"] for it in out["stuck"]] == ["s3", "s2"]
+    assert out["stuck"][0]["attempts"] == [1, 2, 3]
+    assert out["stuck"][0]["priority"] == 0
+    assert out["stuck"][1]["attempts"] == [1, 2]
+    assert out["stuck"][1]["priority"] == 1
+    # Terminal features excluded from stuck
+    assert all(it["id"] not in {"d1", "d2", "d3"} for it in out["stuck"])
+    # 1-attempt feature is NOT stuck
+    assert all(it["id"] != "s1" for it in out["stuck"])
+
+    # Empty board → stuck is empty
+    monkeypatch.setattr(
+        supervisor,
+        "list_remotes",
+        lambda: [{"id": "r2", "name": "empty", "url": "https://e.example", "token": "t"}],
+    )
+    boards["empty"] = []
+    out2 = json.loads(await _tool("portfolio_rollup").ainvoke({}))[0]
+    assert out2["stuck"] == [] and out2["blocked"] == [] and out2["critical_path"] == []
 
 
 @pytest.mark.asyncio
