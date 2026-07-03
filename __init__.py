@@ -139,6 +139,34 @@ async def _fetch_board_features(rec: dict, state: str = "") -> list:
     return r.json().get("features", [])
 
 
+# Lanes where a feature is DONE and can't be a live duplicate — a new dispatch of the same
+# title is legitimately re-doing work. Everything else (backlog/ready/in_progress/in_review/
+# blocked) is "open" and a same-title dispatch would stack (#25).
+_TERMINAL_LANES = {"done", "cancelled", "canceled", "closed", "merged"}
+
+
+def _norm_title(t: str) -> str:
+    """Normalize a feature title for duplicate comparison: trimmed, lowercased, internal
+    whitespace collapsed. Exact-after-normalize only — no fuzzy match (a false positive
+    silently drops a real task, worse than an occasional missed near-dup)."""
+    return " ".join(str(t or "").strip().lower().split())
+
+
+def _open_duplicate(features: list, title: str) -> dict | None:
+    """The first OPEN board feature whose title matches ``title`` (normalized), or None.
+    Used by portfolio_dispatch to refuse stacking a same-title task (Roxy dispatched
+    several 'Assess repo' tasks that piled up, #25)."""
+    want = _norm_title(title)
+    if not want:
+        return None
+    for f in features or []:
+        if str(f.get("board_state", "")).lower() in _TERMINAL_LANES:
+            continue
+        if _norm_title(f.get("title", "")) == want:
+            return f
+    return None
+
+
 def _rollup_one(name: str, features: list) -> dict:
     """Project a board's features into a BOUNDED rollup — lane counts + only the
     blocked / foundation (critical-path) items, never the full feature list. This is
@@ -1203,15 +1231,35 @@ def _tools(cfg: dict | None = None) -> list:
         spec: str,
         acceptance_criteria: str = "",
         files_to_modify: str = "",
+        force: bool = False,
     ) -> str:
         """Dispatch a feature to a team board over A2A. ``board`` is a team-agent name
         (see portfolio_boards). The team's lead agent creates the feature on its OWN
         board and marks it ready; its loop then ships the PR in ITS repo. Give a
         self-sufficient spec + acceptance criteria + the files to touch — a vague task
-        makes a coder produce nothing. Returns the team agent's reply."""
+        makes a coder produce nothing. Returns the team agent's reply.
+
+        DEDUP (#25): refuses to dispatch when a feature with the same title is already
+        OPEN on that board (backlog/ready/in_progress/in_review/blocked) — a PM that
+        re-dispatches the same work stacks duplicate tasks the team churns on. Pass
+        ``force=true`` to dispatch anyway. A board that can't be read is never a blocker
+        (dispatch proceeds — better a possible dup than a stuck PM)."""
         rec = _remote_by_name(board)
         if rec is None:
             return f"Error: no team board named {board!r}. Call portfolio_boards to list them."
+        if not force:
+            try:
+                existing = await _fetch_board_features(rec)
+            except _BoardUnavailable:
+                existing = []  # can't check → don't block the dispatch on a read failure
+            dup = _open_duplicate(existing, title)
+            if dup is not None:
+                return (
+                    f"Skipped — a feature titled {title!r} is already open on {board!r} "
+                    f"({dup.get('id', '?')}, {dup.get('board_state', 'open')}). It's likely the "
+                    "same work; re-read the board (portfolio_board_read) before re-dispatching, "
+                    "or pass force=true to dispatch a second copy anyway."
+                )
         try:
             return await _a2a_create_feature(rec, title, spec, acceptance_criteria, files_to_modify)
         except Exception as exc:  # noqa: BLE001 — surface the dispatch failure to the model
