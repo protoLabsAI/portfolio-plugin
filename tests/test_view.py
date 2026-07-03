@@ -311,3 +311,89 @@ def test_view_page_has_archetype_select():
     html = view.VIEW_PAGE
     assert "/api/plugins/portfolio/archetypes" in html  # the form fetches the presets
     assert 'name="archetype"' in html or "archetype" in html
+
+
+# ── /forget — remove a dead board (#23) ──────────────────────────────────────────
+
+
+def test_forget_disposes_a_spawned_team(monkeypatch):
+    """A portfolio-spawned team is torn down via _dispose (stop + purge + unregister)."""
+    disposed = {}
+
+    def _fake_dispose(team):
+        disposed["team"] = team["name"]
+        return {"team": team["name"], "purged": True}
+
+    monkeypatch.setattr(portfolio, "_team_by_name", lambda n: {"name": n, "id": f"{n}-id"} if n == "alpha" else None)
+    monkeypatch.setattr(portfolio, "_dispose", _fake_dispose)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    d = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "alpha"}).json()
+    assert d["purged"] is True and disposed["team"] == "alpha"
+
+
+def test_forget_drops_a_dead_local_member_not_in_registry(monkeypatch):
+    """The Roxy case: the team is gone from the spawned-teams registry (teardown can't
+    find it) but lingers as a dead local fleet member — _forget_board stops + purges it."""
+    from graph.fleet import supervisor
+    from graph.workspaces import manager
+
+    calls = {}
+    monkeypatch.setattr(portfolio, "_team_by_name", lambda n: None)  # not in the registry
+    monkeypatch.setattr(supervisor, "list_remotes", lambda: [])
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda: [{"name": "host", "host": True}, {"name": "protocli-check", "id": "protocli-check-id", "port": 7871}],
+    )
+    monkeypatch.setattr(supervisor, "stop", lambda wid: calls.setdefault("stopped", wid))
+    monkeypatch.setattr(manager, "remove", lambda wid, purge=False: calls.setdefault("removed", (wid, purge)))
+    monkeypatch.setattr(portfolio, "_forget_team", lambda n: calls.setdefault("forgot", n))
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    d = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "protocli-check"}).json()
+    assert d["purged"] is True
+    assert calls["removed"] == ("protocli-check-id", True) and calls["stopped"] == "protocli-check-id"
+
+
+def test_forget_unregisters_a_remote(monkeypatch):
+    from graph.fleet import supervisor
+
+    dropped = {}
+    monkeypatch.setattr(portfolio, "_team_by_name", lambda n: None)
+    monkeypatch.setattr(supervisor, "list_remotes", lambda: [{"name": "ext", "id": "ext"}])
+    monkeypatch.setattr(supervisor, "status", lambda: [{"name": "host", "host": True}])
+    monkeypatch.setattr(supervisor, "remove_remote", lambda n: dropped.setdefault("name", n))
+    monkeypatch.setattr(portfolio, "_forget_team", lambda n: None)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    d = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "ext"}).json()
+    assert d["unregistered"] is True and dropped["name"] == "ext"
+
+
+def test_forget_already_gone_is_idempotent(monkeypatch):
+    """A board with no backing record (already reaped server-side — the stale-card case)
+    returns cleanly, so the dashboard's ✕ always clears the card."""
+    from graph.fleet import supervisor
+
+    monkeypatch.setattr(portfolio, "_team_by_name", lambda n: None)
+    monkeypatch.setattr(supervisor, "list_remotes", lambda: [])
+    monkeypatch.setattr(supervisor, "status", lambda: [{"name": "host", "host": True}])
+    monkeypatch.setattr(portfolio, "_forget_team", lambda n: None)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    d = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "ghost"}).json()
+    assert d["forgotten"] is True and "already cleared" in d["note"]
+
+
+def test_forget_requires_a_board_name(monkeypatch):
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    d = TestClient(app).post("/api/plugins/portfolio/forget", json={}).json()
+    assert "required" in d["error"]
+
+
+def test_view_page_has_remove_affordance():
+    html = view.VIEW_PAGE
+    assert "data-forget" in html  # the ✕ on an unreachable card
+    assert "/api/plugins/portfolio/forget" in html  # wired to the route
