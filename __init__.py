@@ -204,18 +204,56 @@ def _open_duplicate(features: list, title: str) -> dict | None:
 def _rollup_one(name: str, features: list) -> dict:
     """Project a board's features into a BOUNDED rollup — lane counts + only the
     blocked / foundation (critical-path) items, never the full feature list. This is
-    what keeps a PM's context small when reasoning over many boards."""
+    what keeps a PM's context small when reasoning over many boards.
+
+    Each blocked / critical_path entry carries ``priority`` (int; P0 = highest).
+    ``blocked`` is sorted P0-first, then by id. A ``stuck`` list flags non-terminal
+    features that keep bouncing (``attempts`` length >= 2) — work that needs attention
+    beyond the normal blocker view. Terminal (done/cancelled) features never appear in
+    blocked / critical / stuck."""
     counts: dict[str, int] = {}
     blocked: list[dict] = []
     critical: list[dict] = []
+    stuck: list[dict] = []
     for f in features:
         st = f.get("board_state", "backlog")
         counts[st] = counts.get(st, 0) + 1
+        # Terminal features never surface in the active views — they're done.
+        if st in _TERMINAL_LANES:
+            continue
+        pri = f.get("priority")
         if f.get("blocked") or f.get("dag_blocked"):
-            blocked.append({"id": f.get("id"), "title": f.get("title", "")})
-        if f.get("foundation") and st != "done":
-            critical.append({"id": f.get("id"), "title": f.get("title", ""), "state": st})
-    return {"board": name, "total": len(features), "counts": counts, "blocked": blocked, "critical_path": critical}
+            blocked.append({"id": f.get("id"), "title": f.get("title", ""), "priority": pri})
+        if f.get("foundation"):
+            critical.append({"id": f.get("id"), "title": f.get("title", ""), "state": st, "priority": pri})
+        # Stuck = non-terminal work that keeps bouncing (>= 2 attempts).
+        attempts = f.get("attempts") or []
+        if len(attempts) >= 2:
+            stuck.append(
+                {
+                    "id": f.get("id"),
+                    "title": f.get("title", ""),
+                    "state": st,
+                    "attempts": attempts,
+                    "priority": pri,
+                }
+            )
+    blocked.sort(key=lambda x: (x.get("priority") if x.get("priority") is not None else float("inf"), x.get("id", "")))
+    critical.sort(key=lambda x: (x.get("priority") if x.get("priority") is not None else float("inf"), x.get("id", "")))
+    stuck.sort(
+        key=lambda x: (
+            -len(x.get("attempts") or []),
+            x.get("priority") if x.get("priority") is not None else float("inf"),
+        )
+    )
+    return {
+        "board": name,
+        "total": len(features),
+        "counts": counts,
+        "blocked": blocked,
+        "critical_path": critical,
+        "stuck": stuck,
+    }
 
 
 def _parse_boards(boards: str) -> set | None:
