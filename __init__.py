@@ -139,6 +139,40 @@ async def _fetch_board_features(rec: dict, state: str = "") -> list:
     return r.json().get("features", [])
 
 
+async def _cancel_board_feature(rec: dict, feature_id: str, reason: str = "") -> dict:
+    """POST a cancel to a remote team board's ``project_board`` API — the write twin of
+    ``_fetch_board_features``, using the same bearer + egress vetting. The board's
+    ``/features/{id}/cancel`` moves the feature to the terminal ``cancelled`` lane (a
+    distinct state, not deleted). Raises ``_BoardUnavailable`` on transport/HTTP error so
+    the caller formats the message."""
+    fid = str(feature_id or "").strip()
+    if not fid:
+        raise _BoardUnavailable("no feature id")
+    url = rec["url"].rstrip("/") + f"/api/plugins/project_board/features/{fid}/cancel"
+    from security import policy
+
+    blocked = policy.check_url(url)
+    if blocked:
+        raise _BoardUnavailable(blocked)
+
+    import httpx
+
+    headers = {"Authorization": f"Bearer {rec['token']}"} if rec.get("token") else {}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(url, headers=headers, json={"reason": reason or ""})
+    except Exception as exc:  # noqa: BLE001
+        raise _BoardUnavailable(str(exc)) from exc
+    if r.status_code == 404:
+        raise _BoardUnavailable(f"feature {fid!r} not found on the board (or project_board not enabled there)")
+    if r.status_code >= 400:
+        raise _BoardUnavailable(f"HTTP {r.status_code} {r.text[:200]}")
+    try:
+        return r.json()
+    except Exception:  # noqa: BLE001 — a 200 with no/again-non-JSON body still means done
+        return {"id": fid, "cancelled": True}
+
+
 # Lanes where a feature is DONE and can't be a live duplicate — a new dispatch of the same
 # title is legitimately re-doing work. Everything else (backlog/ready/in_progress/in_review/
 # blocked) is "open" and a same-title dispatch would stack (#25).
@@ -1266,6 +1300,25 @@ def _tools(cfg: dict | None = None) -> list:
             return f"Error dispatching to {board!r}: {exc}"
 
     @tool
+    async def portfolio_cancel_feature(board: str, feature_id: str, reason: str = "") -> str:
+        """Cancel a task on a team board (#27) — the PM's un-dispatch. ``board`` is a
+        team-agent name (see portfolio_boards); ``feature_id`` is a feature id from
+        portfolio_board_read (e.g. ``bd-3``). Moves the feature to the terminal
+        ``cancelled`` lane on the team's board over its project_board API (the same
+        bearer the reads use) — so the team stops working it and it clears from the
+        active view. The managed repo + any PR already opened are NOT touched. Optional
+        ``reason`` is recorded in the board's audit. Use this to stop a stuck or
+        duplicate task instead of letting it churn."""
+        rec = _remote_by_name(board)
+        if rec is None:
+            return f"Error: no team board named {board!r}. Call portfolio_boards to list them."
+        try:
+            out = await _cancel_board_feature(rec, feature_id, reason)
+        except _BoardUnavailable as exc:
+            return f"Error cancelling {feature_id!r} on {board!r}: {exc}"
+        return json.dumps(out, indent=2)
+
+    @tool
     async def portfolio_board_read(board: str, state: str = "") -> str:
         """Read a team board's current state (structured) — the bounded view a PM
         reasons over. ``board`` is a team-agent name (see portfolio_boards); optional
@@ -1678,6 +1731,7 @@ def _tools(cfg: dict | None = None) -> list:
     return [
         portfolio_boards,
         portfolio_dispatch,
+        portfolio_cancel_feature,
         portfolio_board_read,
         portfolio_rollup,
         portfolio_diff,

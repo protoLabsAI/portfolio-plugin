@@ -1,6 +1,6 @@
 id: portfolio
 name: Portfolio (multi-team orchestration)
-version: 0.14.6
+version: 0.14.7
 description: >-
   The PM / program orchestration layer (ADR 0055 P1). One agent orchestrates work
   across MANY team-agents, each running its own project board for its own repo
@@ -12,7 +12,9 @@ description: >-
   Tools: portfolio_boards (enumerate), portfolio_dispatch (send a feature to a
   team board over A2A — refuses a same-title task already open on that board
   unless force=true, so re-dispatches don't stack duplicates),
-  portfolio_board_read (structured read of one team board),
+  portfolio_cancel_feature (un-dispatch: cancel a task on a team board over its
+  project_board API — stop a stuck or duplicate task), portfolio_board_read
+  (structured read of one team board),
   portfolio_rollup (bounded cross-board view — per-board lane counts + only the
   blocked/critical-path items, so a PM reasons over MANY boards without raw reads),
   portfolio_diff (what changed since last check — merged/blocked/unblocked/new) +
