@@ -1020,3 +1020,23 @@ def test_shipped_template_filesystem_fenced_to_the_repo():
     assert fs["enabled"] is True
     assert fs["allow_run"] is False
     assert fs["projects"] == [{"name": "{{TEAM_NAME}}", "path": "{{REPO}}", "write": True}]
+
+
+# ── onboarding is scan-and-report ONLY — the PM owns the board (#33/#34 postmortem) ──
+
+
+def test_onboard_instruction_forbids_board_writes_and_code_changes():
+    """A freshly-booted team told to both auto-fix hygiene AND board judgment gaps
+    didn't reliably keep those apart in practice — it board_create_feature'd the
+    SAME item twice in one turn (project_board#63), and even the "safe auto-fix"
+    items ended up as board features. The instruction now forbids both outright:
+    scan and report only, no board writes, no code changes."""
+    instruction = portfolio._onboard_instruction("/repo/x")
+    assert "do NOT create board features" in instruction
+    assert "do NOT make any code changes" in instruction
+    assert "onboard-project" in instruction  # still runs the skill — just to SCAN
+
+
+def test_onboard_instruction_defers_the_call_to_the_pm():
+    instruction = portfolio._onboard_instruction("/repo/x")
+    assert "PM decides" in instruction

@@ -642,17 +642,29 @@ def _onboard_instruction(repo: str) -> str:
     """The one-time 'get this repo ready' brief sent to a freshly-spawned team. Reaches the
     team as an A2A message (the channel a spawned team reliably reads — its persona falls
     back to the host's SOUL, so readiness rides on this instruction + the team's loaded
-    onboard-project skill, not on a per-team persona)."""
+    onboard-project skill, not on a per-team persona).
+
+    SCAN + REPORT ONLY — no board writes, no repo writes (#33/#34 postmortem: a freshly-
+    booted team told to both "auto-fix the safe stuff directly" AND "board the judgment
+    calls" didn't reliably keep those apart — everything it found (even the "safe" items)
+    ended up as a board feature, and worse, the SAME feature got board_create_feature'd
+    twice in one turn (project_board#63). Splitting "safe auto-fix" vs "board it" is a
+    judgment call an LLM under its own steam won't apply consistently; removing the team's
+    write path during onboarding removes the judgment call instead of relying on the team
+    to make it correctly. The PM (not the team) owns the board — it reads this summary
+    (portfolio_spinup_team's return value) and decides what becomes a portfolio_dispatch,
+    which already dedupes (#25)."""
     return (
-        "Before any feature work, get this repo ready for the board. Run your onboard-project "
-        f"skill on the repo at {repo}:\n"
-        "- Scan it (stack, build/test command, .gitignore, grounding doc, git posture).\n"
-        "- Auto-fix the safe, deterministic gaps directly via your coder (e.g. a grounding/"
-        "PROTO.md doc if missing, ignoring build output) — do NOT blanket-ignore .proto (its "
-        "evolve/ holds versioned skills; only session scratch is ignored, already handled).\n"
-        "- Board the judgment gaps (a grounding doc, PR CI) as features if they need real work.\n"
-        "Report a short readiness summary: PASS / FIXED / BOARDED per item. Do not invent work "
-        "beyond readiness — the actual task will be dispatched separately."
+        f"Run your onboard-project skill on the repo at {repo} to scan it for board "
+        "readiness — do NOT create board features and do NOT make any code changes. This "
+        "is a read-only diagnostic pass; the PM decides what happens next.\n"
+        "- Check: stack, build/test command, .gitignore, grounding doc (PROTO.md/CLAUDE.md/"
+        "AGENTS.md), git posture.\n"
+        "- Note: .proto/evolve holds versioned skills — a missing/incomplete .gitignore "
+        "entry there is about session scratch only (.proto/memory/, session-notes.md, "
+        "repo-map-cache.json), never the whole .proto/ dir.\n"
+        "Reply with a short PASS / GAP per item — no fixes, no board entries, no PRs. The "
+        "PM reads this and dispatches whatever needs real work."
     )
 
 
@@ -1226,8 +1238,14 @@ async def _spinup_team(
         "ready": ready,
         "onboarding": onboarding,
         "next": (
-            f"Send work with portfolio_dispatch(board={name!r}, title=..., spec=...). "
-            f"Dispose with portfolio_teardown_team({name!r}), or it self-disposes "
+            (
+                f"Review the onboarding summary above — the team didn't board anything from "
+                f"it. If any GAP needs real work, portfolio_dispatch(board={name!r}, "
+                "title=..., spec=...) it yourself. "
+                if onboard and onboarding not in ("skipped", "")
+                else f"Send work with portfolio_dispatch(board={name!r}, title=..., spec=...). "
+            )
+            + f"Dispose with portfolio_teardown_team({name!r}), or it self-disposes "
             "(portfolio_autodispose) once its board drains."
             + ("" if ready else " NOTE: still booting — give it a moment before dispatching.")
         ),
@@ -1583,9 +1601,11 @@ def _tools(cfg: dict | None = None) -> list:
         ``coders`` ladder, and the ``coder`` plugin's own ADR 0064 search-ladder) into a
         scoped workspace, binds ``repo`` into it (filling the ``{{REPO}}`` / ``{{TEAM_NAME}}`` /
         ``{{GATE}}`` sentinels in the template), points it at the external plugins it needs,
-        starts the agent, registers it as a team board, and (by default) has the team
-        ONBOARD the repo before you dispatch work — so the existing portfolio_dispatch /
-        portfolio_board_read / rollup tools address it by ``name`` and its first PR ships clean.
+        starts the agent, registers it as a team board, and (by default) has the team scan
+        the repo for readiness before you dispatch work — a read-only diagnostic pass, NO
+        board features and no code changes (the team never self-boards; the PM owns the
+        board). Read the returned ``onboarding`` summary and ``portfolio_dispatch`` whatever
+        actually needs work — the same dedup-guarded path as any other feature.
 
         Args:
             name: The team name (also its fleet/A2A name + board prefix). Must be unique.
@@ -1606,11 +1626,14 @@ def _tools(cfg: dict | None = None) -> list:
                 host already has installed — no per-team reinstall. (delegates is builtin and
                 plugin-devkit is in-tree, so those load regardless.) Override only to isolate.
             onboard: If true (default) and a repo is given, the team runs its onboard-project
-                skill once before you dispatch work — scan, auto-fix hygiene, write a grounding
-                doc, board readiness gaps. Best-effort; never fails the spawn. Set false to skip.
+                skill once before you dispatch work — a READ-ONLY scan (stack, build/test
+                command, grounding doc, git posture); it reports PASS/GAP per item and makes
+                NO board features or code changes. Best-effort; never fails the spawn. Set
+                false to skip. Review the returned summary yourself and ``portfolio_dispatch``
+                whatever needs real work.
 
-        Returns the team's name, port, A2A endpoint, repo freshness, an onboarding summary,
-        and next steps.
+        Returns the team's name, port, A2A endpoint, repo freshness, a readiness scan summary
+        (yours to act on — the team didn't board anything from it), and next steps.
         """
         result = await _spinup_team(
             name, repo, template, gate, port, auto_dispose, plugins_dir, onboard, archetype, shared_board, cfg=cfg
