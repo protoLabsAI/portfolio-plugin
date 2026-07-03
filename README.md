@@ -45,8 +45,9 @@ portfolio_autodispose()                                   # once its board drain
 ```
 
 **The team template.** `portfolio_spinup_team` clones a base team `langgraph-config.yaml`
-(the team's plugins — `project_board` + `delegates` — and its coder ladder), filling these
-per-spawn sentinels — comment-preserving, so the template stays readable:
+(the team's plugins — `project_board` + `delegates` + `coder` — and its model-tier coders
+ladder), filling these per-spawn sentinels — comment-preserving, so the template stays
+readable:
 
 | Sentinel | Filled with |
 |---|---|
@@ -81,6 +82,139 @@ its in-repo `PROTO.md` grounding). See [`examples/README.md`](examples/README.md
 **Auto-dispose** only ever touches teams *this PM spawned* with `auto_dispose=True`, and
 never an empty board (a team with no work yet) — so a hand-registered standing team and a
 just-spawned team are both safe.
+
+## Team template
+
+The shipped [`examples/team-template/`](examples/team-template/) is the default
+`langgraph-config.yaml` `portfolio_spinup_team` clones when you don't point it at your own
+(see [`examples/README.md`](examples/README.md) for the general templating mechanics). This
+is a field-by-field reference for what's in it and why, so you can copy it and know what
+every line does.
+
+### The `{{...}}` sentinels
+
+Plain string replace over the cloned config, so the template's own comments survive:
+
+| Sentinel | Filled with |
+|---|---|
+| `{{REPO}}` | the `repo` argument — the repo this team's board manages and its coders branch worktrees off |
+| `{{TEAM_NAME}}` | the `name` argument — the team's `identity.name` and its `filesystem.projects` label |
+| `{{GATE}}` | the `gate` argument — the pre-PR check command (`project_board.local_gate_cmd`); empty = no gate |
+
+### `identity` + `model` (gateway-inherit)
+
+```yaml
+identity:
+  name: "{{TEAM_NAME}}"
+
+model:
+  provider: openai
+  name: protolabs/reasoning
+  api_base: ""        # blank → inherits the PM host's gateway
+  api_key: ""          # blank → the PM's OPENAI_API_KEY reaches the team via its environment
+  temperature: 0.2
+```
+
+Leave `model.api_base` **blank** (as shipped) and `portfolio_spinup_team` fills it from the
+PM host's own resolved gateway (v0.14+) — so a spawned team boots ready-to-think with **no
+creds prep**. The host's key rides into the team's process environment too, so an env-only
+`OPENAI_API_KEY` reaches it. Only set `api_base` (and drop a `secrets.yaml` next to the
+template) when you want *this* team on a **different** gateway than the PM's.
+
+### `agent_runtime`
+
+`native` runs the team's brain on the `model:` above (the gateway model). Set it to
+`acp:claude` to give the team an Opus brain instead — requires the `claude` CLI on PATH and
+`ANTHROPIC_MODEL=opus` in the launch environment.
+
+### `delegates` — the two supported ACP coders
+
+```yaml
+delegates:
+  - { name: proto, type: acp, command: proto, args: ["--acp"], workdir: "{{REPO}}", permissions: auto }
+  - { name: claude, type: acp, command: claude-code, workdir: "{{REPO}}", permissions: auto }
+```
+
+These are the coding agents the board's loop dispatches to over ACP (ADR 0024/0025), each
+confined to a `workdir` bound to `{{REPO}}`:
+
+- **`proto`** — the `proto` CLI, launched with `--acp`.
+- **`claude`** — Claude Code, launched as `claude-code` — an adapter **alias** for the
+  `claude-agent-acp` binary (`npm i -g @agentclientprotocol/claude-agent-acp`). It takes
+  **no launch args** (unlike `proto`, it doesn't need `--acp`).
+
+Declaring both means the `coders` ladder below (and the `coder` plugin's search ladder) has
+somewhere to escalate to — a capability failure on one coder can climb to the other.
+
+### `project_board` — the coders ladder + tier-escalation
+
+```yaml
+project_board:
+  repo: "{{REPO}}"
+  coders:
+    smart: proto
+    reasoning: claude
+  loop_enabled: true
+  local_gate_cmd: "{{GATE}}"
+```
+
+- **`repo`** — the repo this board manages; every feature's disposable `git worktree`
+  branches off it.
+- **`coders`** — a **model-tier escalation ladder** over the delegates declared above,
+  cheapest-first (`smart` → `reasoning`). The board's loop dispatches the top ready feature
+  to `smart` (`proto`); if that coder makes **no diff / times out** (a capability failure,
+  not a test failure), the loop climbs to the next tier (`reasoning` / `claude`) and retries.
+  It escalates by throwing a bigger brain at the problem, not by searching harder.
+- **`loop_enabled: true`** — the board auto-dispatches ready features; an ephemeral team
+  should just run without a human pulling the trigger.
+- **`local_gate_cmd`** — the repo's real pre-PR check command; a coder's branch must pass it
+  before a PR opens.
+
+### `coder` — the search-ladder escalation (ADR 0064)
+
+```yaml
+coder:
+  delegate: proto
+```
+
+Where `project_board.coders` escalates by **model tier**, the `coder` plugin escalates by
+**search depth on a fixed model** — the two axes compose. When a feature's EARS acceptance
+criteria compile to tests and the coders above still can't pass them, the board can reach
+for `coder`'s difficulty-gated ladder: **greedy** (one shot) → **best-of-k** (k candidates,
+execution-selected) → **tree-search** (refine on the *failing* tests, bounded depth) →
+**fusion** (opt-in, richest generator). Every rung is gated on tests actually passing, never
+an LLM judge — it's the missing execution-verification rung in the board loop, reserved for
+genuinely **hard, verifiable** features the cheaper coders above failed.
+
+`coder` runs **model-authored code in a subprocess** — isolation, **not** a true sandbox
+(the same caveat as `execute_code`) — so only enable it for a trusted model/host. See
+[ADR 0064](https://github.com/protoLabsAI/protoAgent/blob/main/docs/adr/0064-coder-execution-grounded-code-solve.md)
+for the full ladder, the verifier contract, and the board-seam design.
+
+### `filesystem` — fenced to the repo
+
+```yaml
+filesystem:
+  enabled: true
+  allow_run: false
+  projects:
+    - { name: "{{TEAM_NAME}}", path: "{{REPO}}", write: true }
+```
+
+The fenced filesystem (ADR 0007) scopes the team to exactly one project: its own repo, with
+write access (for planning/grounding docs, not just code — the coders write code via their
+own ACP workdir). `allow_run` stays `false` so a coder can never stall the loop on a HITL
+shell-approval prompt.
+
+### See also
+
+- [ADR 0055](https://github.com/protoLabsAI/protoAgent/blob/main/docs/adr/0055-multi-team-orchestration-federated-boards.md) —
+  multi-team orchestration (why teams are separate protoAgent instances federated over A2A,
+  and how the PM addresses them as boards).
+- [ADR 0064](https://github.com/protoLabsAI/protoAgent/blob/main/docs/adr/0064-coder-execution-grounded-code-solve.md) —
+  the `coder` execution-grounded search ladder and the board seam it wires into.
+- [`examples/README.md`](examples/README.md) — the general template mechanics (sentinels,
+  where a spawned team's plugins come from, prebuilt repo-teams).
 
 ## Console view
 
