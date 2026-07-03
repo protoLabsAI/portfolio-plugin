@@ -15,8 +15,8 @@
 # than the PM's. (The gateway key rides the PM's environment into the spawned team, so an
 # env-only OPENAI_API_KEY reaches it too.) A sibling secrets.yaml — if present — is cloned
 # alongside (copy secrets.example.yaml → secrets.yaml and fill it) for that per-team case.
-# The team's plugins (project_board + delegates) come from the bundle the host already has
-# installed, or install them into the template dir's plugins/ first.
+# The team's plugins (project_board + delegates + coder) come from the bundle the host
+# already has installed, or install them into the template dir's plugins/ first.
 
 identity:
   name: "{{TEAM_NAME}}"
@@ -33,19 +33,43 @@ model:
 agent_runtime: native
 
 plugins:
-  enabled: [delegates, project_board]
+  enabled: [delegates, project_board, coder]
 
-# Coding agents the board's loop dispatches to (ACP). workdir is bound to the repo.
+# Coding agents the board's loop dispatches to (ACP) — BOTH supported coders, so the
+# tier ladder below (project_board.coders) has somewhere to escalate to. workdir is
+# bound to the repo.
 delegates:
   - { name: proto, type: acp, command: proto, args: ["--acp"], workdir: "{{REPO}}", permissions: auto }
+  # 'claude-code' is the adapter alias for the claude-agent-acp binary (takes no launch
+  # args, unlike proto) — the same binary a Claude-brained team already runs, so it's
+  # on PATH for free. Needs `npm i -g @agentclientprotocol/claude-agent-acp` otherwise.
+  - { name: claude, type: acp, command: claude-code, workdir: "{{REPO}}", permissions: auto }
 
 project_board:
   repo: "{{REPO}}"            # the repo the board manages; worktrees branch off it
-  coders:                     # escalation ladder (fast → smart → reasoning)
-    fast: proto
+  coders:                     # escalation ladder (model tier climbs smart → reasoning → opus)
     smart: proto
+    reasoning: claude
+    # projectBoard's TIER_LADDER has a 3rd rung ("opus") above reasoning — architectural-
+    # difficulty features start there, and a feature that still fails at "reasoning" climbs
+    # to it. With only two declared delegates there's no distinct 3rd coder, so this reuses
+    # "claude" rather than leaving it unmapped: unmapped falls back to project_board.coder
+    # (default "proto"), which would silently DEMOTE the top rung to the same coder as
+    # "smart" — the opposite of "escalate to a bigger brain". Point this at a real 3rd
+    # delegate (e.g. an opus-tier ACP agent) if you add one.
+    opus: claude
   loop_enabled: true          # auto-dispatch ready features (an ephemeral team should just run)
   local_gate_cmd: "{{GATE}}"  # pre-PR gate — the repo's real check command (empty = none)
+
+# coder (ADR 0064) — the execution-grounded escalation: when a feature's EARS acceptance
+# compiles to tests and the coders above still can't pass them, the board can search
+# HARDER on a FIXED model — greedy → best-of-k → tree-search (refine on the failing
+# tests) — gated on the tests actually passing, not an LLM judge. This is a different
+# axis than the coders ladder above (which climbs model tier); the two compose. It runs
+# MODEL-AUTHORED CODE in a subprocess (isolation, NOT a true sandbox, like execute_code)
+# — enable only for a trusted model/host.
+coder:
+  delegate: proto   # candidate generator for the search ladder (reuse a delegate declared above)
 
 # Fenced filesystem (ADR 0007): the team reads its repo + writes planning/grounding.
 # allow_run stays false so a coder can't stall on a HITL shell prompt.

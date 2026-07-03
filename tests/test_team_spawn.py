@@ -949,3 +949,74 @@ async def test_spinup_binds_on_a_legacy_root_layout_host(fleet, template, tmp_pa
     assert out.get("team") == "legacy", out
     bound = (tmp_path / "ws" / "legacy" / "langgraph-config.yaml").read_text()
     assert "{{REPO}}" not in bound and str(repo) in bound
+
+
+# ── shipped example template (examples/team-template) — content contract ─────────
+# The template a fresh install spins up with NO template= arg (`_default_template`).
+# It's the multi-ACP recipe (proto + claude) users copy — assert its SHAPE so a future
+# edit can't silently drop a delegate or break the coders ladder.
+
+
+def _shipped_template_doc():
+    import yaml
+
+    path = Path(portfolio._default_template()) / "langgraph-config.yaml"
+    return yaml.safe_load(path.read_text())
+
+
+def test_shipped_template_parses():
+    doc = _shipped_template_doc()
+    assert isinstance(doc, dict) and doc  # valid YAML, non-empty
+
+
+def test_shipped_template_enables_delegates_project_board_and_coder():
+    doc = _shipped_template_doc()
+    assert doc["plugins"]["enabled"] == ["delegates", "project_board", "coder"]
+
+
+def test_shipped_template_declares_both_acp_delegates():
+    doc = _shipped_template_doc()
+    by_name = {d["name"]: d for d in doc["delegates"]}
+    assert set(by_name) == {"proto", "claude"}
+
+    proto = by_name["proto"]
+    assert proto["type"] == "acp"
+    assert proto["command"] == "proto"
+    assert proto["args"] == ["--acp"]
+    assert proto["workdir"] == "{{REPO}}"
+    assert proto["permissions"] == "auto"
+
+    claude = by_name["claude"]
+    assert claude["type"] == "acp"
+    assert claude["command"] == "claude-code"  # alias for the claude-agent-acp binary
+    assert claude.get("args") in (None, [])  # claude-code takes no launch args
+    assert claude["workdir"] == "{{REPO}}"
+    assert claude["permissions"] == "auto"
+
+
+def test_shipped_template_coders_ladder_escalates_smart_to_reasoning_to_opus():
+    doc = _shipped_template_doc()
+    pb = doc["project_board"]
+    assert pb["repo"] == "{{REPO}}"
+    # projectBoard's TIER_LADDER is smart -> reasoning -> opus; leaving the top rung
+    # unmapped would fall back to project_board.coder (default "proto") and silently
+    # DEMOTE the top of the ladder to the same coder as "smart". With only two ACP
+    # delegates declared, "opus" reuses "claude" (the strongest available) so escalation
+    # never regresses.
+    assert pb["coders"] == {"smart": "proto", "reasoning": "claude", "opus": "claude"}
+    assert pb["loop_enabled"] is True
+    assert pb["local_gate_cmd"] == "{{GATE}}"
+
+
+def test_shipped_template_coder_plugin_points_at_a_declared_delegate():
+    doc = _shipped_template_doc()
+    delegate_names = {d["name"] for d in doc["delegates"]}
+    assert doc["coder"]["delegate"] in delegate_names  # coder generates via a delegate declared above
+
+
+def test_shipped_template_filesystem_fenced_to_the_repo():
+    doc = _shipped_template_doc()
+    fs = doc["filesystem"]
+    assert fs["enabled"] is True
+    assert fs["allow_run"] is False
+    assert fs["projects"] == [{"name": "{{TEAM_NAME}}", "path": "{{REPO}}", "write": True}]
