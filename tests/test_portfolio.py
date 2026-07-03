@@ -69,6 +69,11 @@ async def test_dispatch_sends_over_a2a_with_the_stored_bearer(monkeypatch):
 
     monkeypatch.setattr(adapters.ADAPTERS["a2a"], "dispatch", fake_dispatch)
 
+    async def _no_features(rec, state=""):  # empty board → dedup check passes cleanly
+        return []
+
+    monkeypatch.setattr(portfolio, "_fetch_board_features", _no_features)
+
     out = await _tool("portfolio_dispatch").ainvoke(
         {
             "board": "team-web",
@@ -682,3 +687,100 @@ async def test_plan_excludes_dispatched_planned_links(monkeypatch, tmp_path):
     plan = json.loads(await _tool("portfolio_plan").ainvoke({}))
     assert plan["links"][0]["dispatched"] is True
     assert plan["ready_to_dispatch"] == [] and plan["blocked"] == []  # already dispatched → off the work lists
+
+
+# ── portfolio_dispatch dedup (#25) ────────────────────────────────────────────
+
+
+def test_open_duplicate_matches_normalized_title_on_open_lanes_only():
+    feats = [
+        {"id": "bd-1", "title": "Assess repo", "board_state": "done"},  # terminal → not a dup
+        {"id": "bd-2", "title": "  ASSESS   repo ", "board_state": "in_progress"},  # open, normalizes-equal
+    ]
+    dup = portfolio._open_duplicate(feats, "assess repo")
+    assert dup is not None and dup["id"] == "bd-2"
+    # a title only present in a terminal lane is NOT a live duplicate
+    assert portfolio._open_duplicate([feats[0]], "Assess repo") is None
+    # no match
+    assert portfolio._open_duplicate(feats, "Different task") is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_refuses_a_same_title_open_feature(monkeypatch):
+    from graph.fleet import supervisor
+    from plugins.delegates import adapters
+
+    monkeypatch.setattr(
+        supervisor,
+        "list_remotes",
+        lambda: [{"id": "r1", "name": "team-web", "url": "https://web.example/", "token": "t"}],
+    )
+
+    async def _feats(rec, state=""):
+        return [{"id": "bd-3", "title": "Assess repo", "board_state": "in_progress"}]
+
+    monkeypatch.setattr(portfolio, "_fetch_board_features", _feats)
+    dispatched = {"n": 0}
+
+    async def _should_not_run(d, query, *, timeout=None):
+        dispatched["n"] += 1
+        return "created"
+
+    monkeypatch.setattr(adapters.ADAPTERS["a2a"], "dispatch", _should_not_run)
+
+    out = await _tool("portfolio_dispatch").ainvoke({"board": "team-web", "title": "assess repo", "spec": "s"})
+    assert "already open" in out and "bd-3" in out and "in_progress" in out
+    assert dispatched["n"] == 0  # never dispatched the duplicate
+
+
+@pytest.mark.asyncio
+async def test_dispatch_force_overrides_dedup(monkeypatch):
+    from graph.fleet import supervisor
+    from plugins.delegates import adapters
+
+    monkeypatch.setattr(
+        supervisor,
+        "list_remotes",
+        lambda: [{"id": "r1", "name": "team-web", "url": "https://web.example/", "token": "t"}],
+    )
+
+    async def _feats(rec, state=""):
+        return [{"id": "bd-3", "title": "Assess repo", "board_state": "ready"}]
+
+    monkeypatch.setattr(portfolio, "_fetch_board_features", _feats)
+
+    async def _dispatch(d, query, *, timeout=None):
+        return "Created bd-9; state ready."
+
+    monkeypatch.setattr(adapters.ADAPTERS["a2a"], "dispatch", _dispatch)
+    out = await _tool("portfolio_dispatch").ainvoke(
+        {"board": "team-web", "title": "Assess repo", "spec": "s", "force": True}
+    )
+    assert out == "Created bd-9; state ready."
+
+
+@pytest.mark.asyncio
+async def test_dispatch_proceeds_when_the_board_cant_be_read(monkeypatch):
+    """An unreadable board must never block a dispatch — better a possible dup than a
+    PM that can't dispatch at all."""
+    from graph.fleet import supervisor
+    from plugins.delegates import adapters
+    from portfolio import _BoardUnavailable
+
+    monkeypatch.setattr(
+        supervisor,
+        "list_remotes",
+        lambda: [{"id": "r1", "name": "team-web", "url": "https://web.example/", "token": "t"}],
+    )
+
+    async def _boom(rec, state=""):
+        raise _BoardUnavailable("no board exposed")
+
+    monkeypatch.setattr(portfolio, "_fetch_board_features", _boom)
+
+    async def _dispatch(d, query, *, timeout=None):
+        return "Created bd-1; state ready."
+
+    monkeypatch.setattr(adapters.ADAPTERS["a2a"], "dispatch", _dispatch)
+    out = await _tool("portfolio_dispatch").ainvoke({"board": "team-web", "title": "anything", "spec": "s"})
+    assert out == "Created bd-1; state ready."
