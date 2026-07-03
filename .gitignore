@@ -4,3 +4,16 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 secrets.yaml
+
+# A dev/dogfood checkout of THIS repo can also be a team's `project_board.repo` — its
+# own `_beads_init` runs `br init` here if `.beads` is absent, which is per-instance
+# board state, never meant to be committed to the plugin's own source (mirrors the
+# convention in projectBoard-plugin's own .gitignore).
+.beads/
+.beads-demo/
+
+# The `proto` coding agent's per-session scratch (NOT the whole .proto/ — .proto/evolve
+# holds protoCLI-managed skills that should stay versioned if ever added deliberately).
+.proto/memory/
+.proto/session-notes.md
+.proto/repo-map-cache.json
