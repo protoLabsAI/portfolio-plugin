@@ -371,6 +371,32 @@ def test_forget_unregisters_a_remote(monkeypatch):
     assert d["unregistered"] is True and dropped["name"] == "ext"
 
 
+def test_forget_unregisters_remote_matched_by_id_only(monkeypatch):
+    """A remote matched by ``id`` (not ``name``) must still be removed using the
+    matched record's ``name`` — otherwise the raw input arg hits ``remove_remote``
+    and the remote stays behind (the exception handler swallows it silently)."""
+    from graph.fleet import supervisor
+
+    dropped = {}
+    monkeypatch.setattr(portfolio, "_team_by_name", lambda n: None)
+    # The remote's stored name differs from the id the operator typed.
+    monkeypatch.setattr(
+        supervisor,
+        "list_remotes",
+        lambda: [{"name": "ext-stored", "id": "ext-uuid-abc123"}],
+    )
+    monkeypatch.setattr(supervisor, "status", lambda: [{"name": "host", "host": True}])
+    monkeypatch.setattr(supervisor, "remove_remote", lambda n: dropped.setdefault("name", n))
+    monkeypatch.setattr(portfolio, "_forget_team", lambda n: None)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    # Operator types the id, not the stored name.
+    d = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "ext-uuid-abc123"}).json()
+    assert d["unregistered"] is True
+    # The remote is removed by its STORED name, not the raw id arg.
+    assert dropped["name"] == "ext-stored"
+
+
 def test_forget_already_gone_is_idempotent(monkeypatch):
     """A board with no backing record (already reaped server-side — the stale-card case)
     returns cleanly, so the dashboard's ✕ always clears the card."""

@@ -915,9 +915,10 @@ def _forget_board(name: str) -> dict:
     out: dict = {"board": name}
     dropped = False
     # A registered remote (external board) → just unregister it.
-    if any(r.get("name") == name or r.get("id") == name for r in supervisor.list_remotes()):
+    matched_remote = next((r for r in supervisor.list_remotes() if r.get("name") == name or r.get("id") == name), None)
+    if matched_remote is not None:
         try:
-            supervisor.remove_remote(name)
+            supervisor.remove_remote(matched_remote["name"])
             out["unregistered"] = dropped = True
         except Exception as exc:  # noqa: BLE001
             out["unregister_error"] = str(exc)
