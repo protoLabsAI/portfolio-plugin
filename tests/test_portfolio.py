@@ -172,6 +172,7 @@ def test_register_exposes_the_tools():
     assert set(seen) == {
         "portfolio_boards",
         "portfolio_dispatch",
+        "portfolio_cancel_feature",
         "portfolio_board_read",
         "portfolio_rollup",
         "portfolio_diff",
@@ -784,3 +785,97 @@ async def test_dispatch_proceeds_when_the_board_cant_be_read(monkeypatch):
     monkeypatch.setattr(adapters.ADAPTERS["a2a"], "dispatch", _dispatch)
     out = await _tool("portfolio_dispatch").ainvoke({"board": "team-web", "title": "anything", "spec": "s"})
     assert out == "Created bd-1; state ready."
+
+
+# ── portfolio_cancel_feature (#27) ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cancel_feature_posts_to_the_board_with_the_bearer(monkeypatch):
+    import httpx
+
+    from graph.fleet import supervisor
+    from security import policy
+
+    monkeypatch.setattr(
+        supervisor,
+        "list_remotes",
+        lambda: [{"id": "r1", "name": "team-web", "url": "https://web.example/", "token": "tok-web"}],
+    )
+    monkeypatch.setattr(policy, "check_url", lambda _u: "")  # allow
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"id": "bd-3", "board_state": "cancelled"}
+
+    class _Client:
+        def __init__(self, **_kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            seen.update(url=url, headers=headers, body=json)
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+    out = json.loads(
+        await _tool("portfolio_cancel_feature").ainvoke({"board": "team-web", "feature_id": "bd-3", "reason": "dup"})
+    )
+    assert out == {"id": "bd-3", "board_state": "cancelled"}
+    assert seen["url"] == "https://web.example/api/plugins/project_board/features/bd-3/cancel"
+    assert seen["headers"]["Authorization"] == "Bearer tok-web"
+    assert seen["body"] == {"reason": "dup"}
+
+
+@pytest.mark.asyncio
+async def test_cancel_feature_unknown_board(monkeypatch):
+    from graph.fleet import supervisor
+
+    monkeypatch.setattr(supervisor, "list_remotes", lambda: [])
+    out = await _tool("portfolio_cancel_feature").ainvoke({"board": "nope", "feature_id": "bd-1"})
+    assert "no team board named 'nope'" in out
+
+
+@pytest.mark.asyncio
+async def test_cancel_feature_missing_id_surfaces_a_clean_error(monkeypatch):
+    import httpx
+
+    from graph.fleet import supervisor
+    from security import policy
+
+    monkeypatch.setattr(
+        supervisor,
+        "list_remotes",
+        lambda: [{"id": "r1", "name": "team-web", "url": "https://web.example", "token": "t"}],
+    )
+    monkeypatch.setattr(policy, "check_url", lambda _u: "")
+
+    class _Resp:
+        status_code = 404
+        text = "not found"
+
+    class _Client:
+        def __init__(self, **_kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    out = await _tool("portfolio_cancel_feature").ainvoke({"board": "team-web", "feature_id": "ghost"})
+    assert "Error cancelling 'ghost' on 'team-web'" in out and "not found" in out
