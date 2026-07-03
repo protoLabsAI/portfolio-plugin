@@ -47,9 +47,17 @@ delegates:
 
 project_board:
   repo: "{{REPO}}"            # the repo the board manages; worktrees branch off it
-  coders:                     # escalation ladder (model tier climbs smart → reasoning)
+  coders:                     # escalation ladder (model tier climbs smart → reasoning → opus)
     smart: proto
     reasoning: claude
+    # projectBoard's TIER_LADDER has a 3rd rung ("opus") above reasoning — architectural-
+    # difficulty features start there, and a feature that still fails at "reasoning" climbs
+    # to it. With only two declared delegates there's no distinct 3rd coder, so this reuses
+    # "claude" rather than leaving it unmapped: unmapped falls back to project_board.coder
+    # (default "proto"), which would silently DEMOTE the top rung to the same coder as
+    # "smart" — the opposite of "escalate to a bigger brain". Point this at a real 3rd
+    # delegate (e.g. an opus-tier ACP agent) if you add one.
+    opus: claude
   loop_enabled: true          # auto-dispatch ready features (an ephemeral team should just run)
   local_gate_cmd: "{{GATE}}"  # pre-PR gate — the repo's real check command (empty = none)
 

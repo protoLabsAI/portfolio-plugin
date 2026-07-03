@@ -24,11 +24,11 @@ template's comments survive):
 
 - `delegates` is **builtin** and `plugin-devkit` is **in-tree** — both load in any
   workspace for free.
-- External plugins (`project_board`, `coder`, `github`) need a discovery root. `portfolio_spinup_team`
-  defaults the spawned team's `plugins.dir` to the **PM host's own plugins dir**, so the team
-  reuses what the host already has installed — no per-team reinstall. Override with the
-  `plugins_dir` arg or `portfolio.team_plugins_dir` config, or bake a `plugins.dir` into the
-  template (it's respected if present).
+- External plugins (`project_board`, `coder`, `github`) need a discovery root.
+  `portfolio_spinup_team` defaults the spawned team's `plugins.dir` to the **PM host's own
+  plugins dir**, so the team reuses what the host already has installed — no per-team
+  reinstall. Override with the `plugins_dir` arg or `portfolio.team_plugins_dir` config, or
+  bake a `plugins.dir` into the template (it's respected if present).
 - `secrets.yaml` (next to the template's `langgraph-config.yaml`) is cloned too — copy the
   `secrets.example.yaml` and fill in the gateway key.
 

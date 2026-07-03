@@ -716,9 +716,9 @@ def _exclude_proto_scratch(repo: str) -> None:
 def _host_plugins_dir() -> str:
     """The PM host's live plugins dir (where its git-installed plugins live). The default
     ``plugins.dir`` for a spawned team, so it discovers the SAME external plugins the host
-    already has — project_board, github — without a per-workspace reinstall. (delegates is
-    builtin and plugin-devkit is in-tree under REPO_ROOT/plugins, so both load free in any
-    workspace; only external plugins need a discovery root.)"""
+    already has — project_board, coder, github — without a per-workspace reinstall.
+    (delegates is builtin and plugin-devkit is in-tree under REPO_ROOT/plugins, so both load
+    free in any workspace; only external plugins need a discovery root.)"""
     from graph.plugins.installer import live_plugins_dir
 
     return str(live_plugins_dir())
@@ -727,8 +727,10 @@ def _host_plugins_dir() -> str:
 def _default_template() -> str:
     """The plugin's own shipped example team template — the fallback when neither a
     ``template=`` arg nor ``portfolio.team_template`` is set, so portfolio_spinup_team works
-    out of the box. It's a generic project_board + delegates team; point team_template at a
-    creds-filled copy (gateway key + model.api_base) for teams that run real model turns."""
+    out of the box. It's a generic project_board + delegates + coder team (both `proto` and
+    `claude` ACP coders, tier-escalation ladder, ADR 0064 search-ladder); point team_template
+    at a creds-filled copy (gateway key + model.api_base) for teams that run real model
+    turns."""
     p = Path(__file__).parent / "examples" / "team-template"
     return str(p) if (p / "langgraph-config.yaml").exists() else ""
 
@@ -1102,8 +1104,9 @@ async def _spinup_team(
         return {
             "error": (
                 "Error: no team template. Pass template=<path to a base team langgraph-config.yaml> or set "
-                "portfolio.team_template in config. The template carries project_board + delegates + the coder "
-                "ladder; its {{REPO}} / {{TEAM_NAME}} / {{GATE}} sentinels are filled per spawn."
+                "portfolio.team_template in config. The template carries project_board (with its model-tier "
+                "coders ladder) + delegates + the coder plugin (ADR 0064 search-ladder); its {{REPO}} / "
+                "{{TEAM_NAME}} / {{GATE}} sentinels are filled per spawn."
             )
         }
     if not Path(tmpl).expanduser().exists():
@@ -1576,8 +1579,9 @@ def _tools(cfg: dict | None = None) -> list:
         FRESHENED (git fetch + fast-forward the default branch) before the team works on it.
 
         It clones a base TEAM config ``template`` (a langgraph-config.yaml that carries the
-        team's plugins — project_board + delegates — and its coder ladder) into a scoped
-        workspace, binds ``repo`` into it (filling the ``{{REPO}}`` / ``{{TEAM_NAME}}`` /
+        team's plugins — project_board, delegates, coder — project_board's model-tier
+        ``coders`` ladder, and the ``coder`` plugin's own ADR 0064 search-ladder) into a
+        scoped workspace, binds ``repo`` into it (filling the ``{{REPO}}`` / ``{{TEAM_NAME}}`` /
         ``{{GATE}}`` sentinels in the template), points it at the external plugins it needs,
         starts the agent, registers it as a team board, and (by default) has the team
         ONBOARD the repo before you dispatch work — so the existing portfolio_dispatch /
@@ -1597,7 +1601,7 @@ def _tools(cfg: dict | None = None) -> list:
             port: Bind port (0 = auto-assign the next free fleet port).
             auto_dispose: If true (default), portfolio_autodispose will tear this team
                 down once its board drains. Set false for a team you'll dispose by hand.
-            plugins_dir: Where the team finds its external plugins (project_board, github).
+            plugins_dir: Where the team finds its external plugins (project_board, coder, github).
                 Defaults to the PM host's own plugins dir, so a spawned team reuses what the
                 host already has installed — no per-team reinstall. (delegates is builtin and
                 plugin-devkit is in-tree, so those load regardless.) Override only to isolate.

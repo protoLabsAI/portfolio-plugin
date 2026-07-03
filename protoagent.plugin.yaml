@@ -46,14 +46,15 @@ min_protoagent_version: "0.42.0"
 config:
   # Base team config for portfolio_spinup_team — a path to a langgraph-config.yaml (or its
   # config dir; a sibling secrets.yaml is cloned too). It carries the team's plugins
-  # (project_board + delegates) and coder ladder; the {{REPO}} / {{TEAM_NAME}} / {{GATE}}
+  # (project_board, delegates, coder), project_board's model-tier coders ladder, and the
+  # coder plugin's own ADR 0064 search-ladder; the {{REPO}} / {{TEAM_NAME}} / {{GATE}}
   # sentinels in it are filled per spawn. Empty falls back to the plugin's shipped example
   # template (examples/team-template) — point this at a creds-filled copy (gateway key +
   # model.api_base) for teams that run real model turns.
   team_template: ""
-  # Where a spawned team finds its EXTERNAL plugins (project_board, github). Empty = default
-  # to the PM host's own plugins dir, so a spawned team reuses what the host already has
-  # installed (delegates is builtin + plugin-devkit is in-tree, so those load regardless).
+  # Where a spawned team finds its EXTERNAL plugins (project_board, coder, github). Empty =
+  # default to the PM host's own plugins dir, so a spawned team reuses what the host already
+  # has installed (delegates is builtin + plugin-devkit is in-tree, so those load regardless).
   team_plugins_dir: ""
   # Prebuilt team archetypes — named (repo, gate) presets for the repos this PM works often,
   # so spinning a team up is one word: portfolio_spinup_team(name=..., archetype=<name>) (or

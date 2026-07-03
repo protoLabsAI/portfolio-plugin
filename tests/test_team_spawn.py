@@ -994,11 +994,16 @@ def test_shipped_template_declares_both_acp_delegates():
     assert claude["permissions"] == "auto"
 
 
-def test_shipped_template_coders_ladder_escalates_smart_to_reasoning():
+def test_shipped_template_coders_ladder_escalates_smart_to_reasoning_to_opus():
     doc = _shipped_template_doc()
     pb = doc["project_board"]
     assert pb["repo"] == "{{REPO}}"
-    assert pb["coders"] == {"smart": "proto", "reasoning": "claude"}
+    # projectBoard's TIER_LADDER is smart -> reasoning -> opus; leaving the top rung
+    # unmapped would fall back to project_board.coder (default "proto") and silently
+    # DEMOTE the top of the ladder to the same coder as "smart". With only two ACP
+    # delegates declared, "opus" reuses "claude" (the strongest available) so escalation
+    # never regresses.
+    assert pb["coders"] == {"smart": "proto", "reasoning": "claude", "opus": "claude"}
     assert pb["loop_enabled"] is True
     assert pb["local_gate_cmd"] == "{{GATE}}"
 

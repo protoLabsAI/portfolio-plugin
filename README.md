@@ -154,6 +154,7 @@ project_board:
   coders:
     smart: proto
     reasoning: claude
+    opus: claude
   loop_enabled: true
   local_gate_cmd: "{{GATE}}"
 ```
@@ -161,10 +162,17 @@ project_board:
 - **`repo`** — the repo this board manages; every feature's disposable `git worktree`
   branches off it.
 - **`coders`** — a **model-tier escalation ladder** over the delegates declared above,
-  cheapest-first (`smart` → `reasoning`). The board's loop dispatches the top ready feature
-  to `smart` (`proto`); if that coder makes **no diff / times out** (a capability failure,
-  not a test failure), the loop climbs to the next tier (`reasoning` / `claude`) and retries.
-  It escalates by throwing a bigger brain at the problem, not by searching harder.
+  cheapest-first (`smart` → `reasoning` → `opus` — projectBoard's full `TIER_LADDER`;
+  architectural-difficulty features start at `opus` and any feature climbs to it after
+  failing `reasoning`). The board's loop dispatches the top ready feature to `smart`
+  (`proto`); if that coder makes **no diff / times out** (a capability failure, not a test
+  failure), the loop climbs to the next tier (`reasoning` / `claude`) and retries. It
+  escalates by throwing a bigger brain at the problem, not by searching harder.
+  With only two declared delegates there's no distinct 3rd coder for `opus` — this maps it
+  to `claude` too (the strongest one available) rather than leaving it unmapped. An
+  unmapped tier falls back to `project_board.coder` (default `proto`), which would silently
+  **demote** the top rung to the same coder as `smart` — backwards for an "escalate to a
+  bigger brain" ladder. Point `opus` at a real 3rd delegate if you add one.
 - **`loop_enabled: true`** — the board auto-dispatches ready features; an ephemeral team
   should just run without a human pulling the trigger.
 - **`local_gate_cmd`** — the repo's real pre-PR check command; a coder's branch must pass it
