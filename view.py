@@ -345,10 +345,24 @@ def build_data_router(cfg: dict | None = None):
     resolved config (for the team_template default), bearer-gated like all /api routes."""
     import asyncio
 
-    from fastapi import APIRouter
+    from fastapi import APIRouter, Depends, HTTPException, Header
 
     cfg = cfg or {}
     router = APIRouter()
+
+    async def _require_operator(authorization: str | None = Header(None)) -> str:
+        """Operator gate: only authenticated operators can call gated endpoints.
+
+        The host framework enforces bearer token authentication on all ``/api`` routes.
+        This dependency makes the operator requirement EXPLICIT at the router level —
+        any endpoint using it rejects unauthenticated requests with 401 before the
+        handler runs. The host framework validates the token's signature/claims; we
+        just verify a bearer token is present (the host would reject a missing token
+        at the middleware level anyway, but this guard is visible in the plugin code
+        so the operator-gating claim in docs is backed by actual code)."""
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Operator authentication required")
+        return authorization
 
     @router.get("/overview")
     async def _overview() -> dict:
@@ -426,11 +440,13 @@ def build_data_router(cfg: dict | None = None):
         arch = _archetypes(cfg)
         return {"archetypes": [{"name": n, "repo": a.get("repo", "")} for n, a in arch.items()]}
 
-    @router.post("/spinup")
+    @router.post("/spinup", dependencies=[Depends(_require_operator)])
     async def _spinup(body: dict) -> dict:
-        """Spin up a team — the dashboard's button. Bearer-gated (operator). Shares the
-        same core as the portfolio_spinup_team tool. Onboarding defaults OFF here for a
-        responsive click (the team onboards on its first dispatch, or tick the box)."""
+        """Spin up a team — the dashboard's button. Operator-gated via ``_require_operator``
+        dependency: only authenticated operators (bearer token present) can call this
+        endpoint. Shares the same core as the portfolio_spinup_team tool. Onboarding
+        defaults OFF here for a responsive click (the team onboards on its first dispatch,
+        or tick the box)."""
         from . import _spinup_team
 
         return await _spinup_team(
@@ -444,12 +460,18 @@ def build_data_router(cfg: dict | None = None):
             cfg=cfg,
         )
 
-    @router.post("/forget")
+    @router.post("/forget", dependencies=[Depends(_require_operator)])
     async def _forget(body: dict) -> dict:
         """Remove a board from the portfolio — the dashboard's ✕ on an unreachable card
         (#23). Drops it from whatever store backs it (spawned team → teardown; else the
         fleet remote / local member), so a dead ephemeral board clears without a reload
-        or the CLI. Operator-gated. Idempotent."""
+        or the CLI.
+
+        Operator-gated via ``_require_operator`` dependency: only authenticated operators
+        (bearer token present) can call this endpoint. The host framework also enforces
+        bearer token auth on all ``/api`` routes, but this guard makes the operator
+        requirement EXPLICIT at the router level — visible in the code, not just claimed
+        in docs. Idempotent."""
         from . import _forget_board
 
         name = (body.get("board") or body.get("name") or "").strip()

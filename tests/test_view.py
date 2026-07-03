@@ -267,7 +267,9 @@ def test_spinup_route_calls_the_shared_core(monkeypatch):
     app = FastAPI()
     app.include_router(view.build_data_router({"team_template": "/t"}), prefix="/api/plugins/portfolio")
     r = TestClient(app).post(
-        "/api/plugins/portfolio/spinup", json={"name": "docs", "repo": "/r", "onboard": True, "auto_dispose": False}
+        "/api/plugins/portfolio/spinup",
+        json={"name": "docs", "repo": "/r", "onboard": True, "auto_dispose": False},
+        headers={"Authorization": "Bearer test-token"},
     )
     assert r.json()["team"] == "docs"
     # the button's choices reach the shared core (onboard defaults to the posted value)
@@ -281,7 +283,15 @@ def test_spinup_route_surfaces_errors(monkeypatch):
     monkeypatch.setattr(portfolio, "_spinup_team", fake_spinup)
     app = FastAPI()
     app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
-    d = TestClient(app).post("/api/plugins/portfolio/spinup", json={"name": "docs", "repo": "/r"}).json()
+    d = (
+        TestClient(app)
+        .post(
+            "/api/plugins/portfolio/spinup",
+            json={"name": "docs", "repo": "/r"},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        .json()
+    )
     assert "already exists" in d["error"]
 
 
@@ -295,7 +305,11 @@ def test_spinup_route_passes_archetype(monkeypatch):
     monkeypatch.setattr(portfolio, "_spinup_team", fake_spinup)
     app = FastAPI()
     app.include_router(view.build_data_router({}), prefix="/api/plugins/portfolio")
-    TestClient(app).post("/api/plugins/portfolio/spinup", json={"name": "pc1", "archetype": "protocontent"})
+    TestClient(app).post(
+        "/api/plugins/portfolio/spinup",
+        json={"name": "pc1", "archetype": "protocontent"},
+        headers={"Authorization": "Bearer test-token"},
+    )
     assert captured["archetype"] == "protocontent"
 
 
@@ -328,7 +342,15 @@ def test_forget_disposes_a_spawned_team(monkeypatch):
     monkeypatch.setattr(portfolio, "_dispose", _fake_dispose)
     app = FastAPI()
     app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
-    d = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "alpha"}).json()
+    d = (
+        TestClient(app)
+        .post(
+            "/api/plugins/portfolio/forget",
+            json={"board": "alpha"},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        .json()
+    )
     assert d["purged"] is True and disposed["team"] == "alpha"
 
 
@@ -351,7 +373,15 @@ def test_forget_drops_a_dead_local_member_not_in_registry(monkeypatch):
     monkeypatch.setattr(portfolio, "_forget_team", lambda n: calls.setdefault("forgot", n))
     app = FastAPI()
     app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
-    d = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "protocli-check"}).json()
+    d = (
+        TestClient(app)
+        .post(
+            "/api/plugins/portfolio/forget",
+            json={"board": "protocli-check"},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        .json()
+    )
     assert d["purged"] is True
     assert calls["removed"] == ("protocli-check-id", True) and calls["stopped"] == "protocli-check-id"
 
@@ -367,7 +397,15 @@ def test_forget_unregisters_a_remote(monkeypatch):
     monkeypatch.setattr(portfolio, "_forget_team", lambda n: None)
     app = FastAPI()
     app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
-    d = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "ext"}).json()
+    d = (
+        TestClient(app)
+        .post(
+            "/api/plugins/portfolio/forget",
+            json={"board": "ext"},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        .json()
+    )
     assert d["unregistered"] is True and dropped["name"] == "ext"
 
 
@@ -382,15 +420,91 @@ def test_forget_already_gone_is_idempotent(monkeypatch):
     monkeypatch.setattr(portfolio, "_forget_team", lambda n: None)
     app = FastAPI()
     app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
-    d = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "ghost"}).json()
+    d = (
+        TestClient(app)
+        .post(
+            "/api/plugins/portfolio/forget",
+            json={"board": "ghost"},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        .json()
+    )
     assert d["forgotten"] is True and "already cleared" in d["note"]
 
 
 def test_forget_requires_a_board_name(monkeypatch):
     app = FastAPI()
     app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
-    d = TestClient(app).post("/api/plugins/portfolio/forget", json={}).json()
+    d = (
+        TestClient(app)
+        .post(
+            "/api/plugins/portfolio/forget",
+            json={},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        .json()
+    )
     assert "required" in d["error"]
+
+
+def test_forget_rejects_unauthenticated_requests():
+    """The /forget endpoint is operator-gated: requests without a bearer token are
+    rejected with 401 before the handler runs."""
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    r = TestClient(app).post("/api/plugins/portfolio/forget", json={"board": "alpha"})
+    assert r.status_code == 401
+    assert "authentication" in r.json()["detail"].lower()
+
+
+def test_forget_accepts_authenticated_requests(monkeypatch):
+    """The /forget endpoint accepts requests with a bearer token."""
+    captured = {}
+
+    def fake_forget_board(name):
+        captured["name"] = name
+        return {"board": name, "forgotten": True}
+
+    monkeypatch.setattr(portfolio, "_forget_board", fake_forget_board)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    r = TestClient(app).post(
+        "/api/plugins/portfolio/forget",
+        json={"board": "alpha"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert r.status_code == 200
+    assert captured["name"] == "alpha"
+
+
+def test_spinup_rejects_unauthenticated_requests():
+    """The /spinup endpoint is operator-gated: requests without a bearer token are
+    rejected with 401 before the handler runs."""
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    r = TestClient(app).post("/api/plugins/portfolio/spinup", json={"name": "docs", "repo": "/r"})
+    assert r.status_code == 401
+    assert "authentication" in r.json()["detail"].lower()
+
+
+def test_spinup_accepts_authenticated_requests(monkeypatch):
+    """The /spinup endpoint accepts requests with a bearer token."""
+    captured = {}
+
+    async def fake_spinup(name, repo="", *a, **k):
+        captured["name"] = name
+        return {"team": name}
+
+    monkeypatch.setattr(portfolio, "_spinup_team", fake_spinup)
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    r = TestClient(app).post(
+        "/api/plugins/portfolio/spinup",
+        json={"name": "docs", "repo": "/r"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert r.status_code == 200
+    assert captured["name"] == "docs"
 
 
 def test_view_page_has_remove_affordance():
