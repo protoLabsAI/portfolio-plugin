@@ -826,6 +826,42 @@ def test_inherit_host_gateway_respects_template_gateway(tmp_path, monkeypatch):
     assert yaml.safe_load(cfg.read_text())["model"]["api_base"] == "https://team.gw/v1"  # untouched
 
 
+def test_inherit_host_gateway_fills_a_blank_openai_delegate_url(tmp_path, monkeypatch):
+    """The shipped template's `fusion` delegate (ADR 0064 P3) ships url/api_key blank —
+    same gap-fill discipline as the team's own model block, so it needs no per-team
+    creds prep either."""
+    import yaml
+
+    _host(tmp_path, monkeypatch, api_base="https://gw.host/v1")
+    cfg = _team_cfg(
+        tmp_path,
+        "model:\n  api_base: https://team.gw/v1\n"  # per-team model gateway — untouched below
+        "delegates:\n  - {name: fusion, type: openai, model: protolabs/fusion, url: ''}\n"
+        "  - {name: proto, type: acp, command: proto}\n",
+    )
+    portfolio._inherit_host_gateway(cfg)
+    doc = yaml.safe_load(cfg.read_text())
+    by_name = {d["name"]: d for d in doc["delegates"]}
+    assert by_name["fusion"]["url"] == "https://gw.host/v1"  # gap-filled
+    assert by_name["proto"].get("url", "") == ""  # a non-openai delegate is untouched
+    assert doc["model"]["api_base"] == "https://team.gw/v1"  # the model's OWN gateway, untouched
+
+
+def test_inherit_host_gateway_respects_a_delegates_own_url(tmp_path, monkeypatch):
+    import yaml
+
+    _host(tmp_path, monkeypatch, api_base="https://gw.host/v1")
+    cfg = _team_cfg(
+        tmp_path,
+        "model:\n  api_base: ''\n"
+        "delegates:\n  - {name: fusion, type: openai, model: protolabs/fusion, url: https://fusion.gw/v1}\n",
+    )
+    portfolio._inherit_host_gateway(cfg)
+    doc = yaml.safe_load(cfg.read_text())
+    assert doc["delegates"][0]["url"] == "https://fusion.gw/v1"  # per-delegate gateway respected
+    assert doc["model"]["api_base"] == "https://gw.host/v1"  # the model block still gets filled
+
+
 def test_inherit_host_gateway_copies_host_secrets_when_team_has_none(tmp_path, monkeypatch):
     _host(tmp_path, monkeypatch, api_base="https://gw.host/v1", secrets="OPENAI_API_KEY: sk-host\n")
     cfg = _team_cfg(tmp_path, "model:\n  api_base: ''\n")
@@ -977,7 +1013,7 @@ def test_shipped_template_enables_delegates_project_board_and_coder():
 def test_shipped_template_declares_both_acp_delegates():
     doc = _shipped_template_doc()
     by_name = {d["name"]: d for d in doc["delegates"]}
-    assert set(by_name) == {"proto", "claude"}
+    assert {"proto", "claude"} <= set(by_name)  # plus fusion (openai) — see the next test
 
     proto = by_name["proto"]
     assert proto["type"] == "acp"
@@ -992,6 +1028,26 @@ def test_shipped_template_declares_both_acp_delegates():
     assert claude.get("args") in (None, [])  # claude-code takes no launch args
     assert claude["workdir"] == "{{REPO}}"
     assert claude["permissions"] == "auto"
+
+
+def test_shipped_template_declares_the_fusion_delegate_gateway_blank():
+    """fusion (ADR 0064 P3, rung 4) is an `openai`-type delegate — url/api_key blank
+    so portfolio_spinup_team's gateway-inherit fills them from the host, same as the
+    team's own model block (no per-team creds prep)."""
+    doc = _shipped_template_doc()
+    by_name = {d["name"]: d for d in doc["delegates"]}
+    fusion = by_name["fusion"]
+    assert fusion["type"] == "openai"
+    assert fusion["model"] == "protolabs/fusion"
+    assert fusion.get("url", "") == ""
+    assert fusion.get("api_key", "") == ""
+
+
+def test_shipped_template_wires_fusion_into_the_coder_solve_ladder():
+    doc = _shipped_template_doc()
+    pb = doc["project_board"]
+    assert pb["coder_solve_fusion_delegate"] == "fusion"
+    assert pb["coder_solve_fusion_k"] == 2
 
 
 def test_shipped_template_coders_ladder_escalates_smart_to_reasoning_to_opus():
