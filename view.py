@@ -141,7 +141,7 @@ function card(b){
   const lanes = LANES.map(([k,cls]) =>
     `<div class="lane ${cls}"><div class="n">${counts[k]||0}</div><div class="l">${k.replace("_"," ")}</div></div>`).join("");
   const blocked = (b.blocked||[]).length;
-  const badge = b.spawned ? `<span class="badge eph">ephemeral</span>` : `<span class="badge">standing</span>`;
+  const badge = b.auto_dispose ? `<span class="badge eph">ephemeral</span>` : `<span class="badge">standing</span>`;
   const drained = b.drained ? `<span class="pill drn">drained</span>`
     : reach ? `<span class="pill">${(b.total||0)-(counts.done||0)} active</span>` : "";
   const blk = blocked ? `<span class="pill blk">${blocked} blocked</span> ` : "";
