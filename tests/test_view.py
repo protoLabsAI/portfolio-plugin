@@ -397,3 +397,64 @@ def test_view_page_has_remove_affordance():
     html = view.VIEW_PAGE
     assert "data-forget" in html  # the ✕ on an unreachable card
     assert "/api/plugins/portfolio/forget" in html  # wired to the route
+
+
+# ── ephemeral badge gated on auto_dispose (GH #26) ─────────────────────────────
+
+
+def test_view_page_card_template_reads_auto_dispose_not_spawned():
+    """The ephemeral badge must come from `b.auto_dispose`, not `b.spawned`.
+
+    Regression for GH #26: the dashboard always showed "ephemeral" regardless of the
+    auto_dispose flag. The fix gates the badge on `b.auto_dispose`.
+    """
+    html = view.VIEW_PAGE
+    assert "b.auto_dispose" in html
+    assert 'class="badge eph">ephemeral</span>' in html
+
+
+def test_overview_exposes_auto_dispose_per_board(overview_app):
+    """The overview API must include `auto_dispose` on each board record so the UI
+    can render the ephemeral badge correctly."""
+    data = overview_app.get("/api/plugins/portfolio/overview").json()
+    boards = {b["board"]: b for b in data["boards"]}
+    # alpha was mocked with auto_dispose=True → ephemeral badge
+    assert boards["alpha"]["auto_dispose"] is True
+    # ext is a standing remote (not in teams) → auto_dispose=False → no ephemeral badge
+    assert boards["ext"]["auto_dispose"] is False
+
+
+def test_overview_auto_dispose_false_means_no_ephemeral_badge(monkeypatch):
+    """A team with auto_dispose=False must NOT get the ephemeral badge.
+
+    Regression for GH #26. The card template renders `<span class="badge eph">ephemeral</span>`
+    only when `b.auto_dispose` is truthy.
+    """
+    from graph.fleet import supervisor
+
+    monkeypatch.setattr(
+        portfolio,
+        "_load_teams",
+        lambda: [{"name": "persistent", "repo": "/r", "port": 7901, "auto_dispose": False}],
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "status",
+        lambda: [{"name": "host", "host": True}, {"name": "persistent", "id": "p1", "port": 7901}],
+    )
+    monkeypatch.setattr(
+        portfolio,
+        "_remote_by_name",
+        lambda n: {"persistent": {"name": n, "url": "http://127.0.0.1:7901", "token": ""}}.get(n),
+    )
+
+    async def fake_fetch(rec, state=""):
+        return [{"id": "1", "board_state": "backlog"}]
+
+    monkeypatch.setattr(portfolio, "_fetch_board_features", fake_fetch)
+
+    app = FastAPI()
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    data = TestClient(app).get("/api/plugins/portfolio/overview").json()
+    boards = {b["board"]: b for b in data["boards"]}
+    assert boards["persistent"]["auto_dispose"] is False
