@@ -1,6 +1,6 @@
 # 0001 — The PM quality flywheel: cross-team learning from findings + bounce data
 
-- Status: Proposed (design only — implementation deliberately out of scope this sprint)
+- Status: Accepted (design only — implementation deliberately out of scope this sprint)
 - Date: 2026-07-06
 - Builds on: protoAgent ADR 0006 (observability flywheel — this extends it past "advise"),
   ADR 0055 (federated boards / this plugin's rollup surface), ADR 0064 (execution-grounded
