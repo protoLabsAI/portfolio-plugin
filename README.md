@@ -243,6 +243,9 @@ shell-approval prompt.
   and how the PM addresses them as boards).
 - [ADR 0064](https://github.com/protoLabsAI/protoAgent/blob/main/docs/adr/0064-coder-execution-grounded-code-solve.md) —
   the `coder` execution-grounded search ladder and the board seam it wires into.
+- [docs/adr/0001](docs/adr/0001-pm-quality-flywheel.md) — the PM quality flywheel
+  (design): cross-team learning from the review-findings + bounce data the delivery-loop
+  gates produce. Design-only; implementation scoped for a later sprint.
 - [`examples/README.md`](examples/README.md) — the general template mechanics (sentinels,
   where a spawned team's plugins come from, prebuilt repo-teams).
 
