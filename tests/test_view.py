@@ -87,6 +87,16 @@ def test_view_page_served_public_not_gated():
     assert c.get("/api/plugins/portfolio/dashboard").status_code == 404
 
 
+def test_the_routers_leave_the_host_schema_buildable():
+    """A page route annotated `-> HTMLResponse` with a function-local import can't be
+    resolved when FastAPI builds the schema, and one such route takes the host's whole
+    /openapi.json down (found in QA on the desktop app, 2026-09-11)."""
+    app = FastAPI()
+    app.include_router(view.build_view_router(), prefix="/plugins/portfolio")
+    app.include_router(view.build_data_router(), prefix="/api/plugins/portfolio")
+    assert "/plugins/portfolio/dashboard" in app.openapi()["paths"]
+
+
 # ── the data route returns the rollup ────────────────────────────────────────────
 
 
