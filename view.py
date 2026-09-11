@@ -331,8 +331,12 @@ def build_view_router():
 
     router = APIRouter()
 
-    @router.get("/dashboard")
-    async def _dashboard() -> HTMLResponse:  # served at /plugins/portfolio/dashboard
+    # `response_class=`, not a `-> HTMLResponse` annotation: under postponed annotations
+    # the return type is a string FastAPI resolves against this MODULE's globals, where the
+    # function-local import isn't visible — the unresolved reference made the host's
+    # /openapi.json answer 500 on every agent running this plugin.
+    @router.get("/dashboard", response_class=HTMLResponse)
+    async def _dashboard():  # served at /plugins/portfolio/dashboard
         return HTMLResponse(VIEW_PAGE)
 
     return router
